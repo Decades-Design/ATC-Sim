@@ -1,0 +1,68 @@
+body,
+html {
+  background-color: #111;
+  color: #0f0; /* Classic green phosphor text */
+  font-family: "Courier New", Courier, monospace;
+  height: 100%; /* Make sure body and html can fill the screen */
+  margin: 0;
+  overflow: hidden; /* Prevents scrollbars */
+}
+
+#game-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  width: 100vw; /* 100% of viewport width */
+  height: 100vh; /* 100% of viewport height */
+  /*gap: 10px; */
+  box-sizing: border-box; /* Include padding in width/height calculation */
+}
+
+#radar-scope {
+  /* The canvas size is now controlled by JavaScript */
+  background-color: #000;
+  border: 1px solid #0f0;
+  margin: 0px;
+  margin-right: 10px; /* Space between radar and panel */
+}
+
+#ui-panel {
+  width: 200px;
+  /*height: fit-content; /* Make panel only as tall as its content */
+  border: 1px solid #0f0;
+  padding: 10px;
+  /*flex-shrink: 0; /* Prevent the panel from shrinking */
+}
+
+#commands {
+    margin-top: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 15px; /* Space between each input group */
+}
+
+label {
+    font-size: 14px;
+    margin-bottom: -10px; /* Move label closer to its input */
+}
+
+input {
+    background-color: #222;
+    color: #0f0;
+    border: 1px solid #0f0;
+    padding: 8px;
+    width: 100%;
+    box-sizing: border-box; /* Prevents padding from breaking layout */
+    font-family: inherit;
+    font-size: 14px;
+}
+
+button {
+  background-color: #333;
+  color: #0f0;
+  border: 1px solid #0f0;
+  padding: 10px;
+  width: 100%;
+  margin-top: 10px;
+  cursor: pointer;
+}
