@@ -1,0 +1,17 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<addon name="RealTraffic" guid="f51e8837-056a-49e5-bdbd-29638d9833d3" cycle="2508" revision="1">
+  <mapping simulator="TOOL">
+    <directory name=".">
+      <files destination="cycle_info.txt" source="0e82fddc-d5de-488a-8eac-f7674220343b" />
+      <files destination="cycle.json" source="4af5299c-546d-4cbf-ad58-0f71f8567946" />
+      <files destination="navdb.s3db" source="dab62035-7158-4eae-b9ef-782018a7f683" />
+    </directory>
+  </mapping>
+  <mapping simulator="USER">
+    <directory name=".">
+      <files destination="cycle_info.txt" source="0e82fddc-d5de-488a-8eac-f7674220343b" />
+      <files destination="cycle.json" source="4af5299c-546d-4cbf-ad58-0f71f8567946" />
+      <files destination="navdb.s3db" source="dab62035-7158-4eae-b9ef-782018a7f683" />
+    </directory>
+  </mapping>
+</addon>
