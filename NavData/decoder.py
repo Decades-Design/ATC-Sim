@@ -267,7 +267,7 @@ def field_017(value: str, record):
       s.write('Runway/Helipad as Waypoint\n')
     case 'H':
       s.write('Heliport as Waypoint\n')
-    case 'N':
+    case 'N': 
       s.write('NDB Navaid as Waypoint\n')
     case 'P':
       s.write('Phantom Waypoint\n')

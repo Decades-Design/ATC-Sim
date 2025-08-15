@@ -6,74 +6,39 @@ const headingInput = document.getElementById("heading-input");
 const speedInput = document.getElementById("speed-input");
 const altitudeInput = document.getElementById("altitude-input");
 
-// --- GEOGRAPHICAL SETUP ---
-// CORRECTED: Changed 69" to 09" as there can only be 60 seconds/minutes.
-const topLeftCoord = "45°53'51.0\"N, 008°36'35.0\"E"; 
-const bottomRightCoord = "45°05'08.0\"N, 009°36'50.0\"E";
+// --- SIMULATION SETTINGS ---
+const centerCoord = { lat: 45.45941667, lon: 9.27552778   }; // Centre coordinates
+const radarRangeNM = 35; // The distance from the center to the edge of the screen in nautical miles
 
-/**
- * Parses a DMS (Degrees, Minutes, Seconds) string into decimal degrees.
- * @param {string} dmsStr - The DMS string to parse.
- * @returns {{lat: number, lon: number}}
- */
-function parseDMS(dmsStr) {
-  const parts = dmsStr.split(/[^\d\w\.]+/);
-  const latDeg = parseFloat(parts[0]);
-  const latMin = parseFloat(parts[1]);
-  const latSec = parseFloat(parts[2]);
-  const latDir = parts[3];
-  const lonDeg = parseFloat(parts[4]);
-  const lonMin = parseFloat(parts[5]);
-  const lonSec = parseFloat(parts[6]);
-  const lonDir = parts[7];
+const activeAirports = {
+  "LIML": ["RW35"],
+  "LIMC": ["RW35R"]
+};
 
-  let lat = latDeg + latMin / 60 + latSec / 3600;
-  if (latDir === 'S') {
-    lat = -lat;
-  }
-
-  let lon = lonDeg + lonMin / 60 + lonSec / 3600;
-  if (lonDir === 'W') {
-    lon = -lon;
-  }
-  return { lat, lon };
-}
-
-/**
- * Calculates the distance between two coordinates using the Haversine formula.
- * @param {object} coords1 - The first coordinate {lat, lon}.
- * @param {object} coords2 - The second coordinate {lat, lon}.
- * @returns {number} - The distance in kilometers.
- */
-function haversineDistance(coords1, coords2) {
-    const R = 6371; // Radius of the Earth in km
-    const dLat = (coords2.lat - coords1.lat) * Math.PI / 180;
-    const dLon = (coords2.lon - coords1.lon) * Math.PI / 180;
-    const a =
-        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-        Math.cos(coords1.lat * Math.PI / 180) * Math.cos(coords2.lat * Math.PI / 180) *
-        Math.sin(dLon / 2) * Math.sin(dLon / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    const distance = R * c;
-    return distance;
-}
-
-const topLeft = parseDMS(topLeftCoord);
-const bottomRight = parseDMS(bottomRightCoord);
-
-const radarWidthKm = haversineDistance({ lat: topLeft.lat, lon: topLeft.lon }, { lat: topLeft.lat, lon: bottomRight.lon });
-const radarHeightKm = haversineDistance({ lat: topLeft.lat, lon: topLeft.lon }, { lat: bottomRight.lat, lon: topLeft.lon });
-
-const minLon = Math.min(topLeft.lon, bottomRight.lon);
-const maxLon = Math.max(topLeft.lon, bottomRight.lon);
-const minLat = Math.min(topLeft.lat, bottomRight.lat);
-const maxLat = Math.max(topLeft.lat, bottomRight.lat);
-
-
-// --- GAME CONSTANTS ---
-const RADAR_RANGE_KM = Math.max(radarWidthKm, radarHeightKm);
 const SWEEP_INTERVAL_MS = 2000;
+
+// --- GEOGRAPHICAL CONSTANTS AND HELPERS ---
+const NM_TO_KM = 1.852;
 const KNOTS_TO_KPS = 0.000514444;
+const FEET_TO_KM = 0.0003048;
+
+// These will be calculated dynamically based on the center and range
+let minLon, maxLon, minLat, maxLat;
+
+function calculateGeographicBounds() {
+    const radarRangeKm = radarRangeNM * NM_TO_KM;
+    const centerLatRad = centerCoord.lat * Math.PI / 180;
+
+    // Calculate the change in latitude and longitude for the given range
+    const latDelta = radarRangeKm / 111.32; // Approx km per degree of latitude
+    const lonDelta = radarRangeKm / (111.32 * Math.cos(centerLatRad)); // Varies with latitude
+
+    minLat = centerCoord.lat - latDelta;
+    maxLat = centerCoord.lat + latDelta;
+    minLon = centerCoord.lon - lonDelta;
+    maxLon = centerCoord.lon + lonDelta;
+}
+
 
 // --- Settings ---
 canvas.addEventListener("contextmenu", (e) => {
@@ -82,7 +47,12 @@ canvas.addEventListener("contextmenu", (e) => {
 
 // --- GAME STATE ---
 let aircraftList = [];
-let navDataPoints = []; 
+let navDataPoints = []; // Will hold navigation data points
+let vorData = []; // Will hold VOR data loaded from the database
+let airports = []; // Will hold airport data loaded from the database
+let terminalWaypoints = []; // Will hold terminal waypoint data loaded from the database
+let runways = []; // Will hold runway data loaded from the database
+let ilsData = []; // Will hold ILS data loaded from the database
 let selectedAircraft = null;
 let radarRadius;
 let kmPerPixel;
@@ -213,7 +183,6 @@ class Aircraft {
 }
 
 // --- CORE FUNCTIONS ---
-
 function resizeCanvas() {
   const padding = 20;
   const gap = 10;
@@ -223,7 +192,8 @@ function resizeCanvas() {
   canvas.width = size;
   canvas.height = size;
   radarRadius = canvas.width / 2;
-  kmPerPixel = RADAR_RANGE_KM / size;
+  kmPerPixel = (radarRangeNM * NM_TO_KM * 2) / size; // Total width of scope in km / pixels
+  drawNavData();
 }
 
 function drawVorSymbol(ctx, x, y, size) {
@@ -247,41 +217,211 @@ function drawVorSymbol(ctx, x, y, size) {
   ctx.arc(x, y, 1.5, 0, 2 * Math.PI); // A small 1.5px radius dot
   ctx.fillStyle = "rgba(0, 255, 0, 0.7)";
   ctx.fill(); // Fill the dot
-  // Next, draw the enclosing square for the DME component.
-  // We make the box slightly larger than the hexagon for a nice visual margin.
-  const boxSize = size * 2;
-  ctx.strokeStyle = "rgba(0, 255, 0, 0.7)";
-  ctx.lineWidth = 1.5;
-  ctx.strokeRect(x - boxSize / 2, y - boxSize / 2, boxSize, boxSize);
+}
+
+function latLonToPixel(lat, lon) {
+  console.log("Function Ran")
+
+  const x = ((lon - minLon) / (maxLon - minLon)) * canvas.width;
+  const y = ((maxLat - lat) / (maxLat - minLat)) * canvas.height;
+
+  console.log(`Lat/Lon to Pixel: (${lat}, ${lon}) -> (${x}, ${y})`);
+  console.log(maxLon - minLon);
+  console.log(maxLat - minLat);
+  return { x, y };
 }
 
 function drawNavData() {
-  if (navDataPoints.length === 0) return;
-
   ctx.fillStyle = "rgba(0, 255, 0, 0.7)";
   ctx.strokeStyle = "rgba(0, 255, 0, 0.7)";
   ctx.font = '11px "Courier New"';
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
 
+    // --- Runways ---
+  const drawnRunways = new Set(); // Keep track of runways we've already drawn
+  runways.forEach(runway => {
+    // OLD LINE: if (activeRunways.includes(runway.id) && controlledAirports.includes(runway.airport) && !drawnRunways.has(runway.id)) {
+    // --- NEW LOGIC (replace the line above with this) ---
+    if (activeAirports[runway.airport] && activeAirports[runway.airport].includes(runway.id) && !drawnRunways.has(runway.id)) {
+      // Find the opposite end of the runway
+      const rwyNum = parseInt(runway.id.substring(2, 4));
+      const oppositeNum = rwyNum > 18 ? rwyNum - 18 : rwyNum + 18;
+      const rwySide = runway.id.substring(4);
+      let oppositeSide = '';
+      if (rwySide === 'L') oppositeSide = 'R';
+      if (rwySide === 'R') oppositeSide = 'L';
+      if (rwySide === 'C') oppositeSide = 'C';
+      
+      const oppositeId = `RW${String(oppositeNum).padStart(2, '0')}${oppositeSide}`;
+
+      const oppositeRunway = runways.find(r => r.id === oppositeId && r.airport === runway.airport);
+
+      if (oppositeRunway) {
+        // We found a pair, now draw a single line between them
+        const p1 = latLonToPixel(runway.lat, runway.lon);
+        const p2 = latLonToPixel(oppositeRunway.lat, oppositeRunway.lon);
+
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+        
+        ctx.strokeStyle = "rgba(255, 255, 255, 1)"; // Pure white
+        ctx.lineWidth = 4; // A thick line to represent the runway
+        ctx.stroke();
+
+        // Mark both ends as drawn so we don't draw it again
+        drawnRunways.add(runway.id);
+        drawnRunways.add(oppositeRunway.id);
+      }
+    }
+  });
+
+  // --- Localizer ---
+  ilsData.forEach(ils => {
+    // OLD LINE: if (activeRunways.includes(ils.runway) && controlledAirports.includes(ils.airport)) {
+    // --- NEW LOGIC (replace the line above with this) ---
+    if (activeAirports[ils.airport] && activeAirports[ils.airport].includes(ils.runway)) {
+      // Find the runway that this ILS belongs to.
+      const runway = runways.find(r => r.id === ils.runway && r.airport === ils.airport);
+      if (!runway) return; // Safety check in case the runway isn't found.
+
+      // Get the pixel coordinates for the runway threshold.
+      const threshold = latLonToPixel(runway.lat, runway.lon);
+
+      // 1. Calculate the TRUE bearing for the ILS.
+      // The database bearing is magnetic, so we add declination to get true north.
+      const trueBearing = ils.bearing + ils.declination;
+      const bearingRad = trueBearing * Math.PI / 180;
+
+      // 2. Define the length of the localizer line (e.g., 10 NM).
+      const locLengthPx = (17.6 * NM_TO_KM) / kmPerPixel;
+
+      // 3. Calculate the end point of the line.
+      // We start at the threshold and go "backwards" along the approach path.
+      // This uses the correct navigational-to-canvas coordinate conversion.
+      const endX = threshold.x - Math.sin(bearingRad) * locLengthPx;
+      const endY = threshold.y + Math.cos(bearingRad) * locLengthPx;
+
+      // 4. Draw the line.
+      ctx.beginPath();
+      ctx.moveTo(threshold.x, threshold.y); // Start at the runway threshold.
+      ctx.lineTo(endX, endY);               // Extend out along the approach course.
+      
+      ctx.strokeStyle = "rgba(255, 255, 0, 0.7)"; // Yellow for ILS
+      ctx.lineWidth = 3;
+      ctx.stroke();
+    }
+  });
+
   navDataPoints.forEach(point => {
     const x = ((point.lon - minLon) / (maxLon - minLon)) * canvas.width;
     const y = ((maxLat - point.lat) / (maxLat - minLat)) * canvas.height;
 
-    if (point.type === 'WN') {
+    if (point.type[0] === 'C' || point.type[0] === 'R') {
+      const size = 6; // You can adjust this value or make it a parameter
       ctx.beginPath();
-      ctx.moveTo(x, y - 3.75); // Top point (25% smaller)
-      ctx.lineTo(x - 3, y + 2.25); // Bottom left
-      ctx.lineTo(x + 3, y + 2.25); // Bottom right
+      ctx.moveTo(x, y - size * 0.75); // Top point (75% of size)
+      ctx.lineTo(x - size * 0.6, y + size * 0.45); // Bottom left
+      ctx.lineTo(x + size * 0.6, y + size * 0.45); // Bottom right
       ctx.closePath();
       ctx.fill();
-    } else if (point.type === 'V') {
-      drawVorSymbol(ctx, x, y, 5);
+    } else if (point.type[0] === 'W') {
+      const size = 5; // Size of the star
+      const innerSize = size / 2.5;
+      ctx.beginPath();
+      
+      // 1. Top point
+      ctx.moveTo(x, y - size);
+      // 2. Inner point (top-right)
+      ctx.lineTo(x + innerSize, y - innerSize);
+      // 3. Right point
+      ctx.lineTo(x + size, y);
+      // 4. Inner point (bottom-right)
+      ctx.lineTo(x + innerSize, y + innerSize);
+      // 5. Bottom point
+      ctx.lineTo(x, y + size);
+      // 6. Inner point (bottom-left)
+      ctx.lineTo(x - innerSize, y + innerSize);
+      // 7. Left point
+      ctx.lineTo(x - size, y);
+      // 8. Inner point (top-left)
+      ctx.lineTo(x - innerSize, y - innerSize);
+
+      ctx.closePath();
+      ctx.fill();
     }
 
     // Only display name if it does NOT contain a number
     if (!/\d/.test(point.name)) {
       ctx.fillText(point.name, x + 8, y);
+    }
+  });
+
+  // --- Draw Terminal Waypoints ---
+  terminalWaypoints.forEach(point => {
+    if (activeAirports[point.airport] && !/\d/.test(point.name)) {
+      const x = ((point.lon - minLon) / (maxLon - minLon)) * canvas.width;
+      const y = ((maxLat - point.lat) / (maxLat - minLat)) * canvas.height;
+
+      if (point.type[0] === 'C' || point.type[0] === 'R') {
+        const size = 6; // You can adjust this value or make it a parameter
+        ctx.beginPath();
+        ctx.moveTo(x, y - size * 0.75); // Top point (75% of size)
+        ctx.lineTo(x - size * 0.6, y + size * 0.45); // Bottom left
+        ctx.lineTo(x + size * 0.6, y + size * 0.45); // Bottom right
+        ctx.closePath();
+        ctx.fill();
+      } else if (point.type[0] === 'W') {
+        const size = 5; // Size of the star
+        const innerSize = size / 2.5;
+        ctx.beginPath();
+        
+        // 1. Top point
+        ctx.moveTo(x, y - size);
+        // 2. Inner point (top-right)
+        ctx.lineTo(x + innerSize, y - innerSize);
+        // 3. Right point
+        ctx.lineTo(x + size, y);
+        // 4. Inner point (bottom-right)
+        ctx.lineTo(x + innerSize, y + innerSize);
+        // 5. Bottom point
+        ctx.lineTo(x, y + size);
+        // 6. Inner point (bottom-left)
+        ctx.lineTo(x - innerSize, y + innerSize);
+        // 7. Left point
+        ctx.lineTo(x - size, y);
+        // 8. Inner point (top-left)
+        ctx.lineTo(x - innerSize, y - innerSize);
+
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      // Only display name if it does NOT contain a number
+      if (!/\d/.test(point.name)) {
+        ctx.fillText(point.name, x + 8, y);
+      }
+    }
+  });
+
+  vorData.forEach(vor => {
+    const size = 5; // Size of the star
+
+    const x = ((vor.lon - minLon) / (maxLon - minLon)) * canvas.width;
+    const y = ((maxLat - vor.lat) / (maxLat - minLat)) * canvas.height;
+
+    console.log(`Loaded VOR:`, vor);
+
+    // Draw the VOR symbol
+    drawVorSymbol(ctx, x, y, size);
+    ctx.fillText(vor.id, x + 8, y);
+
+    if (vor.type[1] === 'D') {
+        const boxSize = size * 2.5;
+        ctx.strokeStyle = "rgba(0, 255, 0, 0.7)";
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(x - boxSize / 2, y - boxSize / 2, boxSize, boxSize);
     }
   });
 }
@@ -302,20 +442,21 @@ function gameLoop(currentTime) {
   }
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  drawNavData();
   displayedAircraft.forEach(plane => plane.draw());
+  drawNavData();
 
   requestAnimationFrame(gameLoop);
 }
 
 // --- NAV DATA LOADING ---
 function loadNavData() {
+  // --- Paths ---
   const wasmPath = 'node_modules/sql.js/dist/sql-wasm.wasm';
-  const dbPath = 'NavData/NavData.sqlite';
+  const dbPath = 'NavData/navdb.s3db';
 
+  // --- Initialize SQL.js and Load Database ---
   initSqlJs({ locateFile: () => wasmPath })
     .then(function(SQL) {
-      console.log("sql.js engine initialized successfully.");
       return fetch(dbPath)
         .then(response => {
           if (!response.ok) {
@@ -324,64 +465,143 @@ function loadNavData() {
           return response.arrayBuffer();
         })
         .then(filebuffer => {
-          console.log("Database file fetched successfully.");
           const dbObject = new SQL.Database(new Uint8Array(filebuffer));
-          console.log("Database loaded into memory.");
 
-          const query = `
-            SELECT * FROM waypoint 
+          // --- Load Waypoints ---
+          let query = `
+            SELECT * FROM main.tbl_enroute_waypoints 
             WHERE 
-              (type = 'WN' OR type = 'V') 
-              AND lonx BETWEEN ${minLon} AND ${maxLon}
-              AND laty BETWEEN ${minLat} AND ${maxLat}
-              AND ident NOT LIKE 'VP%'
-              AND (airport_id IS NULL OR airport_id = '10496')
+              waypoint_longitude BETWEEN ${minLon} AND ${maxLon}
+              AND waypoint_latitude BETWEEN ${minLat} AND ${maxLat}
+              AND waypoint_identifier NOT LIKE 'VP%'
+              AND waypoint_type != 'U'
           `;
           const result = dbObject.exec(query);
-
           if (result.length > 0 && result[0].values.length > 0) {
-            navDataPoints = result[0].values.map(row => {
-              return { 
-                name: row[3], // ident column
-                type: row[9], // type column
-                lon:  row[14], // lonx column
-                lat:  row[15] // laty column
-              };
-            });
-            console.log("Loaded waypoints and VORs");
-          } else {
-            console.log("No waypoints found for the selected region.");
+            navDataPoints = result[0].values.map(row => ({
+              name: row[2], // ident column
+              type: row[4], // type column
+              lon:  row[7], // lonx column
+              lat:  row[6]  // laty column
+            }));
           }
 
-          // Load Airport data
-          const airportQuery = `
-            SELECT * FROM airport 
+          // --- Load Airports ---
+          query = `
+            SELECT * FROM tbl_airports 
             WHERE
-              lonx BETWEEN ${minLon} AND ${maxLon}
-              AND laty BETWEEN ${minLat} AND ${maxLat}
+              airport_ref_longitude BETWEEN ${minLon} AND ${maxLon}
+              AND airport_ref_latitude BETWEEN ${minLat} AND ${maxLat}
+              AND ifr_capability = 'Y'
           `;
-          const airportResult = dbObject.exec(airportQuery);
+          const airportResult = dbObject.exec(query);
           if (airportResult.length > 0 && airportResult[0].values.length > 0) {
-            const airports = airportResult[0].values.map(row => {
-              return {
-                id: row[0], // airport_id column
-                icao: row[2], // icao column  
-                name: row[7], // Name column
-                TA: row[65], // type column
-                lon:  row[68], // lonx column
-                lat:  row[69] // laty column
-              };
-            });
-            console.log("Loaded airports:", airports);
-          } else {
-            console.log("No airports found for the selected region.");
+            airports = airportResult[0].values.map(row => ({
+              icao: row[2],    // icao column  
+              name: row[4],    // Name column
+              lon: row[6],    // lonx column
+              lat: row[5],     // laty column
+              TA: row[10],     // transition altitude column
+              TL: row[11],     // transition level column
+              elevation: row[9] // elevation column
+            }));
+            console.log(`Loaded airport:`, airports);
+          }
+
+          // --- Load VORs ---
+          query = `
+            SELECT * FROM main.tbl_vhfnavaids 
+            WHERE
+              vor_longitude BETWEEN ${minLon} AND ${maxLon}
+              AND vor_latitude BETWEEN ${minLat} AND ${maxLat}
+              AND navaid_class like 'V%'
+          `;
+          const vorResult = dbObject.exec(query);
+          if (vorResult.length > 0 && vorResult[0].values.length > 0) {
+            vorData = vorResult[0].values.map(row => ({
+              id: row[3],     // vor_id column
+              name: row[4],   // name column
+              type: row[6],   // type column
+              lon: row[8],    // lonx column
+              lat: row[7]     // laty column
+            }));
+            console.log(`Loaded VORs:`, vorData);
+          }
+
+          // --- Load Terminal Waypoints ---
+          query = `
+            SELECT * FROM tbl_terminal_waypoints
+            WHERE
+              waypoint_longitude BETWEEN ${minLon} AND ${maxLon}
+              AND waypoint_latitude BETWEEN ${minLat} AND ${maxLat}
+              AND waypoint_identifier NOT LIKE 'VP%'
+          `;
+          const terminalResult = dbObject.exec(query);
+          if (terminalResult.length > 0 && terminalResult[0].values.length > 0) {
+            terminalWaypoints = terminalResult[0].values.map(row => ({
+              name: row[3],   // ident column
+              airport: row[1], // airport column
+              type: row[5],   // type column
+              lon: row[7],    // lonx column
+              lat: row[6]     // laty column
+            }));
+          }
+
+          // --- Load Runways ---
+          query = `
+            SELECT * FROM tbl_runways
+            WHERE
+              runway_longitude BETWEEN ${minLon} AND ${maxLon}
+              AND runway_latitude BETWEEN ${minLat} AND ${maxLat}
+          `;
+          const runwayResult = dbObject.exec(query);
+          if (runwayResult.length > 0 && runwayResult[0].values.length > 0) {
+            runways = runwayResult[0].values.map(row => ({
+              id: row[3],     // runway_id column
+              airport: row[2],   // airport column
+              lon: row[5],    // lonx column
+              lat: row[4],     // laty column
+              length: row[12],  // length column
+              width: row[13],   // width column
+              thrElevation: row[9], // landing threshold elevation column
+              thrXelevation: row[11], // landing threshold crossing elevation column
+              magBearing: row[7], // magnetic bearing column
+              trueBearing: row[8] // true bearing column
+            }));
+            console.log(`Loaded runways:`, runways);
+          }
+
+          // --- ILSs ---
+          query = `
+            SELECT * FROM tbl_localizers_glideslopes
+            WHERE
+              llz_longitude BETWEEN ${minLon} AND ${maxLon}
+              AND llz_latitude BETWEEN ${minLat} AND ${maxLat}
+          `;
+          const ilsResult = dbObject.exec(query);
+          if (ilsResult.length > 0 && ilsResult[0].values.length > 0) {
+            ilsData = ilsResult[0].values.map(row => ({
+              airport: row[2], // airport column
+              runway: row[3], // runway column
+              id: row[4],     // ils_id column
+              type: row[10],   // type column
+              lon: row[6],    // lonx column
+              lat: row[5],     // laty column
+              bearing: row[8],  // bearing column
+              width: row[9],     // width column
+              gsLat: row[11],     // glideslope latitude column
+              gsLon: row[12],      // glideslope longitude column
+              gsAngle: row[13],     // glideslope angle column
+              gsElevation: row[14],   // glideslope elevation column
+              declination: row[15]    // declination column
+            }));
           }
 
           dbObject.close();
         });
     })
     .catch(err => {
-      console.error("A critical error occurred during nav data loading:", err);
+      // Handle errors silently or log if needed
     });
 }
 
@@ -455,6 +675,7 @@ aircraftList.push(new Aircraft("AWE456", 700, 600, 225, 160, 160));
 displayedAircraft = aircraftList.map(p => Object.assign(new Aircraft(), p));
 selectedAircraft = aircraftList[0];
 
-resizeCanvas();
-loadNavData();
-requestAnimationFrame(gameLoop);
+calculateGeographicBounds(); // 1. Set up the geographic area
+loadNavData();             // 2. Load the data for that area
+resizeCanvas();              // 3. Size the canvas
+requestAnimationFrame(gameLoop); // 4. Start the animation
