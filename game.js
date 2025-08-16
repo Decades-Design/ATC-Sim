@@ -7,8 +7,8 @@ const speedInput = document.getElementById("speed-input");
 const altitudeInput = document.getElementById("altitude-input");
 
 // --- SIMULATION SETTINGS ---
-const centerCoord = { lat: 45.45941667, lon: 9.27552778   }; // Centre coordinates
-const radarRangeNM = 35; // The distance from the center to the edge of the screen in nautical miles
+const centerCoord = { lat: 45.44944444, lon: 9.27833333 }; // Centre coordinates
+const radarRangeNM = 30; // The distance from the center to the edge of the screen in nautical miles
 
 const activeAirports = {
   "LIML": ["RW35"],
@@ -53,6 +53,7 @@ let airports = []; // Will hold airport data loaded from the database
 let terminalWaypoints = []; // Will hold terminal waypoint data loaded from the database
 let runways = []; // Will hold runway data loaded from the database
 let ilsData = []; // Will hold ILS data loaded from the database
+let approachPaths = []; // Will hold approach path data loaded from the database
 let selectedAircraft = null;
 let radarRadius;
 let kmPerPixel;
@@ -220,14 +221,8 @@ function drawVorSymbol(ctx, x, y, size) {
 }
 
 function latLonToPixel(lat, lon) {
-  console.log("Function Ran")
-
   const x = ((lon - minLon) / (maxLon - minLon)) * canvas.width;
   const y = ((maxLat - lat) / (maxLat - minLat)) * canvas.height;
-
-  console.log(`Lat/Lon to Pixel: (${lat}, ${lon}) -> (${x}, ${y})`);
-  console.log(maxLon - minLon);
-  console.log(maxLat - minLat);
   return { x, y };
 }
 
@@ -241,10 +236,13 @@ function drawNavData() {
     // --- Runways ---
   const drawnRunways = new Set(); // Keep track of runways we've already drawn
   runways.forEach(runway => {
-    // OLD LINE: if (activeRunways.includes(runway.id) && controlledAirports.includes(runway.airport) && !drawnRunways.has(runway.id)) {
-    // --- NEW LOGIC (replace the line above with this) ---
     if (activeAirports[runway.airport] && activeAirports[runway.airport].includes(runway.id) && !drawnRunways.has(runway.id)) {
-      // Find the opposite end of the runway
+      
+      // 1. Get the starting point (the threshold) in pixel coordinates.
+      const p1 = latLonToPixel(runway.lat, runway.lon);
+      let p2; // This will hold the coordinates of the other end.
+
+      // 2. Try to find the opposite runway to get the most accurate endpoint.
       const rwyNum = parseInt(runway.id.substring(2, 4));
       const oppositeNum = rwyNum > 18 ? rwyNum - 18 : rwyNum + 18;
       const rwySide = runway.id.substring(4);
@@ -254,26 +252,38 @@ function drawNavData() {
       if (rwySide === 'C') oppositeSide = 'C';
       
       const oppositeId = `RW${String(oppositeNum).padStart(2, '0')}${oppositeSide}`;
-
       const oppositeRunway = runways.find(r => r.id === oppositeId && r.airport === runway.airport);
 
       if (oppositeRunway) {
-        // We found a pair, now draw a single line between them
-        const p1 = latLonToPixel(runway.lat, runway.lon);
-        const p2 = latLonToPixel(oppositeRunway.lat, oppositeRunway.lon);
-
-        ctx.beginPath();
-        ctx.moveTo(p1.x, p1.y);
-        ctx.lineTo(p2.x, p2.y);
+        // --- Primary Method ---
+        // If the opposite runway is found, use its precise threshold coordinates.
+        p2 = latLonToPixel(oppositeRunway.lat, oppositeRunway.lon);
+        drawnRunways.add(oppositeRunway.id); // Mark the opposite as drawn as well.
+      } else {
+        // --- Backup Method ---
+        // If no opposite is found, calculate the endpoint using length and bearing.
+        const lengthPx = (runway.length * FEET_TO_KM) / kmPerPixel;
+        const bearingRad = runway.trueBearing * Math.PI / 180;
         
-        ctx.strokeStyle = "rgba(255, 255, 255, 1)"; // Pure white
-        ctx.lineWidth = 4; // A thick line to represent the runway
-        ctx.stroke();
-
-        // Mark both ends as drawn so we don't draw it again
-        drawnRunways.add(runway.id);
-        drawnRunways.add(oppositeRunway.id);
+        // Calculate the end point using the correct navigational trigonometry.
+        p2 = {
+          x: p1.x + Math.sin(bearingRad) * lengthPx,
+          y: p1.y - Math.cos(bearingRad) * lengthPx
+        };
       }
+
+      // 3. Draw the runway using the determined start and end points.
+      // This part is now the same for both methods.
+      ctx.beginPath();
+      ctx.moveTo(p1.x, p1.y);
+      ctx.lineTo(p2.x, p2.y);
+      
+      ctx.strokeStyle = "rgba(255, 255, 255, 1)"; // Pure white
+      ctx.lineWidth = 4;
+      ctx.stroke();
+
+      // 4. Mark this runway as drawn.
+      drawnRunways.add(runway.id);
     }
   });
 
@@ -295,7 +305,60 @@ function drawNavData() {
       const bearingRad = trueBearing * Math.PI / 180;
 
       // 2. Define the length of the localizer line (e.g., 10 NM).
-      const locLengthPx = (17.6 * NM_TO_KM) / kmPerPixel;
+      // --- Filter approachPaths for waypointType[3] === "B"
+      const bTypeApproaches = approachPaths.filter(ap => ap.waypointType && ap.waypointType[3] === "B" && ap.icao === ils.airport);
+
+      // --- Cut first two characters from runway id (e.g., "RW35L" -> "35L")
+      const cutRunway = runway.id.substring(2);
+
+      // --- Further filter for approaches whose id contains the cut runway string
+      const matchingApproaches = bTypeApproaches.filter(ap => ap.id && ap.id.includes(cutRunway));
+      
+      let locLengthPx;
+      if (matchingApproaches.length > 0) {
+        // Count occurrences of each waypointId
+        const idCounts = {};
+        matchingApproaches.forEach(ap => {
+          idCounts[ap.waypointId] = (idCounts[ap.waypointId] || 0) + 1;
+        });
+        // Find the most common waypointId(s)
+        let mostCommonIds = [];
+        let maxCount = 0;
+        for (const id in idCounts) {
+          if (idCounts[id] > maxCount) {
+        maxCount = idCounts[id];
+        mostCommonIds = [id];
+          } else if (idCounts[id] === maxCount) {
+        mostCommonIds.push(id);
+          }
+        }
+        // Prefer waypointIds that do not contain numbers
+        let preferredIds = mostCommonIds.filter(id => !/\d/.test(id));
+        let chosenId;
+        if (preferredIds.length > 0) {
+          chosenId = preferredIds[0];
+        } else {
+          chosenId = mostCommonIds[0];
+        }
+        // Filter to only approaches with the chosen waypointId
+        const filtered = matchingApproaches.filter(ap => ap.waypointId === chosenId);
+        console.log("Filtered approaches:", filtered.map(ap => ap.waypointId));
+        // Use the first (they all have the same waypointId now)
+        const ap = filtered[0];
+        // Calculate distance from threshold to waypoint (in km)
+        const R = 6371; // Earth radius in km
+        const toRad = deg => deg * Math.PI / 180;
+        const dLat = toRad(ap.waypointLat - runway.lat);
+        const dLon = toRad(ap.waypointLon - runway.lon);
+        const a = Math.sin(dLat / 2) ** 2 +
+                  Math.cos(toRad(runway.lat)) * Math.cos(toRad(ap.waypointLat)) *
+                  Math.sin(dLon / 2) ** 2;
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        const distKm = R * c;
+        locLengthPx = distKm / kmPerPixel;
+      } else {
+        locLengthPx = (15 * NM_TO_KM) / kmPerPixel;
+      }
 
       // 3. Calculate the end point of the line.
       // We start at the threshold and go "backwards" along the approach path.
@@ -411,8 +474,6 @@ function drawNavData() {
     const x = ((vor.lon - minLon) / (maxLon - minLon)) * canvas.width;
     const y = ((maxLat - vor.lat) / (maxLat - minLat)) * canvas.height;
 
-    console.log(`Loaded VOR:`, vor);
-
     // Draw the VOR symbol
     drawVorSymbol(ctx, x, y, size);
     ctx.fillText(vor.id, x + 8, y);
@@ -505,7 +566,6 @@ function loadNavData() {
               TL: row[11],     // transition level column
               elevation: row[9] // elevation column
             }));
-            console.log(`Loaded airport:`, airports);
           }
 
           // --- Load VORs ---
@@ -525,7 +585,6 @@ function loadNavData() {
               lon: row[8],    // lonx column
               lat: row[7]     // laty column
             }));
-            console.log(`Loaded VORs:`, vorData);
           }
 
           // --- Load Terminal Waypoints ---
@@ -568,7 +627,6 @@ function loadNavData() {
               magBearing: row[7], // magnetic bearing column
               trueBearing: row[8] // true bearing column
             }));
-            console.log(`Loaded runways:`, runways);
           }
 
           // --- ILSs ---
@@ -594,6 +652,47 @@ function loadNavData() {
               gsAngle: row[13],     // glideslope angle column
               gsElevation: row[14],   // glideslope elevation column
               declination: row[15]    // declination column
+            }));
+          }
+
+          // --- Approach Paths ---
+          const icaoCodes = airports.map(airport => airport.icao);
+          const icaoListForSQL = icaoCodes.map(code => `'${code}'`).join(',');
+          query = `
+            SELECT * FROM tbl_iaps 
+            WHERE 
+              airport_identifier IN (${icaoListForSQL})
+          `;
+          const approachResult = dbObject.exec(query);
+          if (approachResult.length > 0 && approachResult[0].values.length > 0) {
+            approachPaths = approachResult[0].values.map(row => ({
+              icao: row[1], // ICAO code
+              id: row[2],    // IAP ID
+              routeType: row[3], // Route type
+              transitionId: row[4], // Transition ID
+              seqno: row[5], // Sequence number
+              waypointId: row[7], // Waypoint ID
+              waypointLat: row[8], // Waypoint Latitude
+              waypointLon: row[9], // Waypoint Longitude
+              waypointType: row[10], // Waypoint Type
+              turnDirection: row[11], // Turn Direction
+              pathTerm: row[13], // Path Termination
+              navaid: row[14], // Navaid
+              navaidLat: row[15], // Navaid Latitude
+              navaidLon: row[16], // Navaid Longitude
+              arcRadius: row[17], // Arc Radius
+              theta: row[18], // Theta
+              rho: row[19], // Rho
+              magCourse: row[20], // Magnetic Course
+              routeHoldDistanceTime: row[21], // Route Hold Distance Time
+              distanceOrTime: row[22], // Distance or Time
+              altitudeDescription: row[23], // Altitude Description
+              altitude1: row[24], // Altitude 1
+              altitude2: row[25], // Altitude 2
+              transitionAlt: row[26], // Transition Altitude
+              speedLimitDescription: row[27], // Speed Limit Description
+              speedLimit: row[28], // Speed Limit
+              verticalAngle: row[29] // Vertical Angle
             }));
           }
 
