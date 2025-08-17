@@ -1,15 +1,20 @@
 // ================================================================================= //
-//                                    UI & CANVAS ELEMENT GLOBALS                                    //
+//                                    UI & CANVAS ELEMENT GLOBALS                    //
 // ================================================================================= //
 const canvas = document.getElementById("radar-scope");
-const ctx = canvas.getContext("2d"); // The drawing tool for the canvas
+const ctx = canvas.getContext("2d");
+
+const navdataCanvas = document.getElementById("navdata-canvas");
+const navCtx = navdataCanvas.getContext("2d");
+const canvasStack = document.getElementById("canvas-stack");
+
 const uiPanel = document.getElementById("ui-panel");
 const headingInput = document.getElementById("heading-input");
 const speedInput = document.getElementById("speed-input");
 const altitudeInput = document.getElementById("altitude-input");
 
 // ================================================================================= //
-//                                      CORE SIMULATION SETTINGS                                     //
+//                                      CORE SIMULATION SETTINGS                     //
 // ================================================================================= //
 const centerCoord = { lat: 45.44944444, lon: 9.27833333 }; // Centre coordinates
 const radarRangeNM = 30; // The distance from the center to the edge of the screen in nautical miles
@@ -25,7 +30,7 @@ const activeAirports = {
 const SWEEP_INTERVAL_MS = 2000;
 
 // ================================================================================= //
-//                                 GEOGRAPHICAL CONSTANTS & HELPERS                                  //
+//                                 GEOGRAPHICAL CONSTANTS & HELPERS                  //
 // ================================================================================= //
 const NM_TO_KM = 1.852; // Nautical Miles to Kilometers
 const KNOTS_TO_KPS = 0.000514444; // Knots (nautical miles per hour) to Kilometers Per Second
@@ -57,7 +62,7 @@ function calculateGeographicBounds() {
 
 
 // ================================================================================= //
-//                                          GAME STATE                                               //
+//                                          GAME STATE                               //
 // ================================================================================= //
 let aircraftList = []; // The master list of all aircraft in the simulation.
 let navDataPoints = []; // Holds all en-route waypoints loaded from the database.
@@ -72,33 +77,33 @@ let radarRadius; // The radius of the radar scope in pixels, calculated on resiz
 let kmPerPixel; // The ratio of kilometers to pixels, used for converting real-world distances to screen distances.
 
 // ================================================================================= //
-//                                    TIMING & ANIMATION STATE                                       //
+//                                    TIMING & ANIMATION STATE                       //
 // ================================================================================= //
 let lastUpdateTime = 0; // The timestamp of the last frame update.
 let timeSinceLastSweep = 0; // Time accumulator for the radar sweep effect.
 let displayedAircraft = []; // A 'frozen' snapshot of aircraft states, updated every sweep.
 
 // ================================================================================= //
-//                                     AIRCRAFT CLASS DEFINITION                                      //
+//                                     AIRCRAFT CLASS DEFINITION                     //
 // ================================================================================= //
 class Aircraft {
   /**
    * Represents a single aircraft in the simulation.
    * @param {string} callsign - The aircraft's unique identifier.
-   * @param {number} x - The initial X-coordinate on the canvas.
-   * @param {number} y - The initial Y-coordinate on the canvas.
+   * @param {number} lat - The initial latitude.
+   * @param {number} lon - The initial longitude.
    * @param {number} heading - The initial heading in degrees.
    * @param {number} altitude - The initial altitude in feet.
    * @param {number} speed - The initial speed in knots.
    * @param {number} [tagAngle=0] - The initial angle for the data tag, in radians.
    */
-  constructor(callsign, x, y, heading, altitude, speed, tagAngle) {
+  constructor(callsign, lat, lon, heading, altitude, speed, tagAngle) {
     this.callsign = callsign;
-    this.x = x; // Canvas x-position
-    this.y = y; // Canvas y-position
+    // NEW: Position is stored as geographical coordinates, not pixels.
+    this.lat = lat;
+    this.lon = lon;
 
     // Current and target values for aircraft parameters.
-    // The 'target' values are what the simulation smoothly interpolates towards.
     this.heading = heading;
     this.targetHdg = heading;
     this.altitude = altitude;
@@ -106,56 +111,55 @@ class Aircraft {
     this.speed = speed;
     this.targetSpd = speed;
 
-    this.tagAngle = tagAngle || 0; // Angle for the data tag placement
+    this.tagAngle = tagAngle || 0;
   }
 
   /**
-   * Updates the aircraft's position based on its speed, heading, and the time elapsed.
+   * Updates the aircraft's geographical position based on its speed, heading, and the time elapsed.
    * @param {number} deltaTime - The time in seconds since the last update.
    */
   update(deltaTime) {
-    if (!kmPerPixel) return; // Don't update if the scale isn't set yet.
-
-    // 1. Convert speed from knots to kilometers per second.
     const speedInKps = this.speed * KNOTS_TO_KPS;
-    // 2. Calculate distance moved in kilometers.
     const distanceMovedKm = speedInKps * deltaTime;
-    // 3. Convert distance from kilometers to pixels.
-    const distanceMovedPx = distanceMovedKm / kmPerPixel;
-    // 4. Convert heading to radians for trigonometric functions.
-    const rad = this.heading * Math.PI / 180;
+    const bearingRad = this.heading * Math.PI / 180;
+    const latRad = this.lat * Math.PI / 180;
+    const R = 6371; // Earth's radius in km
 
-    // 5. Update x and y coordinates.
-    //    - Sine is used for the x-component because 0 degrees is North (up).
-    //    - Cosine is used for the y-component, and subtracted because y decreases upwards.
-    this.x += Math.sin(rad) * distanceMovedPx;
-    this.y -= Math.cos(rad) * distanceMovedPx;
+    // NEW: This is a more complex calculation to update lat/lon based on distance and bearing.
+    const newLatRad = Math.asin(Math.sin(latRad) * Math.cos(distanceMovedKm / R) +
+      Math.cos(latRad) * Math.sin(distanceMovedKm / R) * Math.cos(bearingRad));
+    const newLonRad = (this.lon * Math.PI / 180) + Math.atan2(Math.sin(bearingRad) * Math.sin(distanceMovedKm / R) * Math.cos(latRad),
+      Math.cos(distanceMovedKm / R) - Math.sin(latRad) * Math.sin(newLatRad));
+
+    this.lat = newLatRad * 180 / Math.PI;
+    this.lon = newLonRad * 180 / Math.PI;
   }
 
   /**
    * Draws the aircraft and its associated data on the canvas.
    */
   draw() {
+    // Convert lat/lon to pixel coordinates right before drawing.
+    const { x, y } = latLonToPixel(this.lat, this.lon);
+
     // --- Draw the aircraft symbol (a circle) ---
     ctx.beginPath();
-    ctx.arc(this.x, this.y, 4, 0, 2 * Math.PI);
+    ctx.arc(x, y, 4, 0, 2 * Math.PI);
     ctx.globalAlpha = 1;
-    ctx.fillStyle = "#0f0"; // Bright green
+    ctx.fillStyle = "#0f0";
     ctx.fill();
     ctx.globalAlpha = 1;
 
     // --- Draw the speed vector line ---
-    // This line indicates the aircraft's heading and speed.
-    // Its length represents the distance the aircraft will travel in a set time (e.g., 60 seconds).
     const lineTimeLength = 60; // seconds
     const speedInKps = this.speed * KNOTS_TO_KPS;
     const distanceKm = speedInKps * lineTimeLength;
-    const lineLength = distanceKm / kmPerPixel; // Convert distance to pixels
+    const lineLength = distanceKm / kmPerPixel;
     const rad = (this.heading * Math.PI) / 180;
-    const endX = this.x + Math.sin(rad) * lineLength;
-    const endY = this.y - Math.cos(rad) * lineLength;
+    const endX = x + Math.sin(rad) * lineLength;
+    const endY = y - Math.cos(rad) * lineLength;
     ctx.beginPath();
-    ctx.moveTo(this.x, this.y);
+    ctx.moveTo(x, y);
     ctx.lineTo(endX, endY);
     ctx.strokeStyle = "#0f0";
     ctx.lineWidth = 2;
@@ -163,20 +167,21 @@ class Aircraft {
 
     // --- Draw the data tag (callsign, altitude, speed) ---
     ctx.font = '12px "Courier New"';
-    const tagRadius = 40; // Distance from the aircraft symbol
-    // Calculate tag position based on the tagAngle
-    const tagX = this.x + tagRadius * Math.cos(this.tagAngle);
-    const tagY = this.y + tagRadius * Math.sin(this.tagAngle);
+    const tagRadius = 40;
+    const tagX = x + tagRadius * Math.cos(this.tagAngle);
+    const tagY = y + tagRadius * Math.sin(this.tagAngle);
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
+    
+    // CHANGED: Convert altitude to Flight Level for display (e.g., 18000 ft -> "180")
+    const flightLevel = Math.round(this.altitude / 100).toString().padStart(3, '0');
+
     ctx.fillText(this.callsign, tagX, tagY - 8);
-    ctx.fillText(`${Math.round(this.altitude)}  ${Math.round(this.speed)}`, tagX, tagY + 8);
+    ctx.fillText(`${flightLevel}  ${Math.round(this.speed)}`, tagX, tagY + 8);
   }
 
-  /**
-   * Smoothly changes the aircraft's heading to a new value.
-   * @param {number} newHeading - The target heading in degrees.
-   */
+  // --- The setHeading, setSpeed, and setAltitude methods remain unchanged. ---
+  // (You can leave them as they are in your original file)
   setHeading(newHeading) {
     if (this._headingInterval) clearInterval(this._headingInterval); // Stop any existing turn.
 
@@ -210,26 +215,19 @@ class Aircraft {
     }, intervalMs);
   }
 
-  /**
-   * Smoothly changes the aircraft's speed to a new value using ease-in-out interpolation.
-   * @param {number} newSpeed - The target speed in knots.
-   */
   setSpeed(newSpeed) {
     if (this._speedInterval) clearInterval(this._speedInterval);
     this.targetSpd = newSpeed;
     const initialSpeed = this.speed;
-    // Duration of the speed change is proportional to the difference in speed.
     const duration = Math.abs(newSpeed - this.speed) * 200;
     const startTime = Date.now();
 
     this._speedInterval = setInterval(() => {
       const elapsed = Date.now() - startTime;
-      const t = Math.min(elapsed / duration, 1); // Normalized time (0 to 1)
-      // Apply a smoothstep function for ease-in-out effect.
+      const t = Math.min(elapsed / duration, 1);
       const smoothT = t * t * (3 - 2 * t);
       this.speed = initialSpeed + (newSpeed - initialSpeed) * smoothT;
 
-      // Stop when duration is reached or we're close enough.
       if (t >= 1 || Math.abs(this.speed - newSpeed) < 0.5) {
         this.speed = newSpeed;
         clearInterval(this._speedInterval);
@@ -238,26 +236,19 @@ class Aircraft {
     }, 30);
   }
 
-  /**
-   * Smoothly changes the aircraft's altitude to a new value using ease-in-out interpolation.
-   * @param {number} newAltitude - The target altitude in feet.
-   */
   setAltitude(newAltitude) {
     if (this._altitudeInterval) clearInterval(this._altitudeInterval);
     this.targetAlt = newAltitude;
     const initialAltitude = this.altitude;
-    // Duration of the altitude change is proportional to the difference.
-    const duration = Math.abs(newAltitude - this.altitude) * 600;
+    const duration = Math.abs(newAltitude - this.altitude) * 6;
     const startTime = Date.now();
 
     this._altitudeInterval = setInterval(() => {
       const elapsed = Date.now() - startTime;
-      const t = Math.min(elapsed / duration, 1); // Normalized time (0 to 1)
-      // Apply a smoothstep function for ease-in-out effect.
+      const t = Math.min(elapsed / duration, 1);
       const smoothT = t * t * (3 - 2 * t);
       this.altitude = initialAltitude + (newAltitude - initialAltitude) * smoothT;
 
-      // Stop when duration is reached or we're close enough.
       if (t >= 1 || Math.abs(this.altitude - newAltitude) < 1) {
         this.altitude = newAltitude;
         clearInterval(this._altitudeInterval);
@@ -268,48 +259,55 @@ class Aircraft {
 }
 
 // ================================================================================= //
-//                                     CANVAS & DRAWING FUNCTIONS                                     //
+//                                     CANVAS & DRAWING FUNCTIONS                    //
 // ================================================================================= //
+
+function pixelToLatLon(x, y) {
+  const lon = (x / navdataCanvas.width) * (maxLon - minLon) + minLon;
+  const lat = maxLat - (y / navdataCanvas.height) * (maxLat - minLat);
+  return { lat, lon };
+}
+
+function latLonToPixel(lat, lon) {
+  const x = ((lon - minLon) / (maxLon - minLon)) * navdataCanvas.width;
+  const y = ((maxLat - lat) / (maxLat - minLat)) * navdataCanvas.height;
+  return { x, y };
+}
+
 function resizeCanvas() {
   const padding = 20;
   const gap = 10;
   const availableWidth = window.innerWidth - uiPanel.offsetWidth - padding - gap;
   const availableHeight = window.innerHeight - padding;
   const size = Math.min(availableWidth, availableHeight);
+
+  canvasStack.style.width = `${size}px`;
+  canvasStack.style.height = `${size}px`;
   canvas.width = size;
   canvas.height = size;
-  radarRadius = canvas.width / 2;
-  kmPerPixel = (radarRangeNM * NM_TO_KM * 2) / size; // Total width of scope in km / pixels
+  navdataCanvas.width = size;
+  navdataCanvas.height = size;
+
+  radarRadius = size / 2;
+  kmPerPixel = (radarRangeNM * NM_TO_KM * 2) / size;
+
   drawNavData();
 }
 
 function drawVorSymbol(ctx, x, y, size) {
-  // --- Draw the Hexagon Outline ---
   ctx.beginPath();
-  // Move to the first vertex (top point)
   ctx.moveTo(x + size * Math.cos(0), y + size * Math.sin(0));
-
-  // Loop to draw the other 5 vertices
   for (let i = 1; i <= 6; i++) {
-    const angle = i * Math.PI / 3; // 60 degrees in radians for each step
+    const angle = i * Math.PI / 3;
     ctx.lineTo(x + size * Math.cos(angle), y + size * Math.sin(angle));
   }
-  
   ctx.strokeStyle = "rgba(0, 255, 0, 0.7)";
   ctx.lineWidth = 1.5;
-  ctx.stroke(); // Draw the outline
-
-  // --- Draw the Center Dot ---
+  ctx.stroke();
   ctx.beginPath();
-  ctx.arc(x, y, 1.5, 0, 2 * Math.PI); // A small 1.5px radius dot
+  ctx.arc(x, y, 1.5, 0, 2 * Math.PI);
   ctx.fillStyle = "rgba(0, 255, 0, 0.7)";
-  ctx.fill(); // Fill the dot
-}
-
-function latLonToPixel(lat, lon) {
-  const x = ((lon - minLon) / (maxLon - minLon)) * canvas.width;
-  const y = ((maxLat - lat) / (maxLat - minLat)) * canvas.height;
-  return { x, y };
+  ctx.fill();
 }
 
 /**
@@ -318,12 +316,16 @@ function latLonToPixel(lat, lon) {
  * This function is called on every frame to ensure the nav data is always visible.
  */
 function drawNavData() {
+
+  console.log("Drawing navigation data...");
   // --- Set default drawing styles for nav data ---
-  ctx.fillStyle = "rgba(0, 255, 0, 0.7)";
-  ctx.strokeStyle = "rgba(0, 255, 0, 0.7)";
-  ctx.font = '11px "Courier New"';
-  ctx.textAlign = "left";
-  ctx.textBaseline = "middle";
+  navCtx.clearRect(0, 0, navdataCanvas.width, navdataCanvas.height);
+
+  navCtx.fillStyle = "rgba(0, 255, 0, 0.7)";
+  navCtx.strokeStyle = "rgba(0, 255, 0, 0.7)";
+  navCtx.font = '11px "Courier New"';
+  navCtx.textAlign = "left";
+  navCtx.textBaseline = "middle";
 
   // --- Draw Runways ---
   // A Set is used to prevent drawing the same physical runway twice (e.g., RW18 and RW36 are the same pavement).
@@ -367,12 +369,12 @@ function drawNavData() {
       }
 
       // --- Draw the Runway Line ---
-      ctx.beginPath();
-      ctx.moveTo(p1.x, p1.y);
-      ctx.lineTo(p2.x, p2.y);
-      ctx.strokeStyle = "rgba(255, 255, 255, 1)"; // Draw runways in pure white for high visibility.
-      ctx.lineWidth = 4;
-      ctx.stroke();
+      navCtx.beginPath();
+      navCtx.moveTo(p1.x, p1.y);
+      navCtx.lineTo(p2.x, p2.y);
+      navCtx.strokeStyle = "rgba(255, 255, 255, 1)"; // Draw runways in pure white for high visibility.
+      navCtx.lineWidth = 4;
+      navCtx.stroke();
 
       // Mark the current runway as drawn to avoid re-processing.
       drawnRunways.add(runway.id);
@@ -459,12 +461,12 @@ function drawNavData() {
       const endY = threshold.y + Math.cos(bearingRad) * locLengthPx;
 
       // 4. Draw the localizer line.
-      ctx.beginPath();
-      ctx.moveTo(threshold.x, threshold.y); // Start at the runway threshold.
-      ctx.lineTo(endX, endY);               // Extend out along the approach course.
-      ctx.strokeStyle = "rgba(255, 255, 0, 0.7)"; // Yellow for ILS
-      ctx.lineWidth = 3;
-      ctx.stroke();
+      navCtx.beginPath();
+      navCtx.moveTo(threshold.x, threshold.y); // Start at the runway threshold.
+      navCtx.lineTo(endX, endY);               // Extend out along the approach course.
+      navCtx.strokeStyle = "rgba(255, 255, 0, 0.7)"; // Yellow for ILS
+      navCtx.lineWidth = 3;
+      navCtx.stroke();
     }
   });
 
@@ -477,32 +479,32 @@ function drawNavData() {
     if (point.type[0] === 'C' || point.type[0] === 'R') {
       // 'C' and 'R' types are drawn as triangles.
       const size = 6;
-      ctx.beginPath();
-      ctx.moveTo(x, y - size * 0.75); // Top point
-      ctx.lineTo(x - size * 0.6, y + size * 0.45); // Bottom left
-      ctx.lineTo(x + size * 0.6, y + size * 0.45); // Bottom right
-      ctx.closePath();
-      ctx.fill();
+      navCtx.beginPath();
+      navCtx.moveTo(x, y - size * 0.75); // Top point
+      navCtx.lineTo(x - size * 0.6, y + size * 0.45); // Bottom left
+      navCtx.lineTo(x + size * 0.6, y + size * 0.45); // Bottom right
+      navCtx.closePath();
+      navCtx.fill();
     } else if (point.type[0] === 'W') {
       // 'W' type (standard waypoint) is drawn as a star.
       const size = 5;
       const innerSize = size / 2.5;
-      ctx.beginPath();
-      ctx.moveTo(x, y - size); // Top point
-      ctx.lineTo(x + innerSize, y - innerSize); // Inner top-right
-      ctx.lineTo(x + size, y); // Right point
-      ctx.lineTo(x + innerSize, y + innerSize); // Inner bottom-right
-      ctx.lineTo(x, y + size); // Bottom point
-      ctx.lineTo(x - innerSize, y + innerSize); // Inner bottom-left
-      ctx.lineTo(x - size, y); // Left point
-      ctx.lineTo(x - innerSize, y - innerSize); // Inner top-left
-      ctx.closePath();
-      ctx.fill();
+      navCtx.beginPath();
+      navCtx.moveTo(x, y - size); // Top point
+      navCtx.lineTo(x + innerSize, y - innerSize); // Inner top-right
+      navCtx.lineTo(x + size, y); // Right point
+      navCtx.lineTo(x + innerSize, y + innerSize); // Inner bottom-right
+      navCtx.lineTo(x, y + size); // Bottom point
+      navCtx.lineTo(x - innerSize, y + innerSize); // Inner bottom-left
+      navCtx.lineTo(x - size, y); // Left point
+      navCtx.lineTo(x - innerSize, y - innerSize); // Inner top-left
+      navCtx.closePath();
+      navCtx.fill();
     }
 
     // Only display the waypoint name if it doesn't contain numbers (filters out runway-specific fixes).
     if (!/\d/.test(point.name)) {
-      ctx.fillText(point.name, x + 8, y);
+      navCtx.fillText(point.name, x + 8, y);
     }
   });
 
@@ -516,30 +518,30 @@ function drawNavData() {
       // Draw the same triangle/star symbols as en-route waypoints.
       if (point.type[0] === 'C' || point.type[0] === 'R') {
         const size = 6;
-        ctx.beginPath();
-        ctx.moveTo(x, y - size * 0.75);
-        ctx.lineTo(x - size * 0.6, y + size * 0.45);
-        ctx.lineTo(x + size * 0.6, y + size * 0.45);
-        ctx.closePath();
-        ctx.fill();
+        navCtx.beginPath();
+        navCtx.moveTo(x, y - size * 0.75);
+        navCtx.lineTo(x - size * 0.6, y + size * 0.45);
+        navCtx.lineTo(x + size * 0.6, y + size * 0.45);
+        navCtx.closePath();
+        navCtx.fill();
       } else if (point.type[0] === 'W') {
         const size = 5;
         const innerSize = size / 2.5;
-        ctx.beginPath();
-        ctx.moveTo(x, y - size);
-        ctx.lineTo(x + innerSize, y - innerSize);
-        ctx.lineTo(x + size, y);
-        ctx.lineTo(x + innerSize, y + innerSize);
-        ctx.lineTo(x, y + size);
-        ctx.lineTo(x - innerSize, y + innerSize);
-        ctx.lineTo(x - size, y);
-        ctx.lineTo(x - innerSize, y - innerSize);
-        ctx.closePath();
-        ctx.fill();
+        navCtx.beginPath();
+        navCtx.moveTo(x, y - size);
+        navCtx.lineTo(x + innerSize, y - innerSize);
+        navCtx.lineTo(x + size, y);
+        navCtx.lineTo(x + innerSize, y + innerSize);
+        navCtx.lineTo(x, y + size);
+        navCtx.lineTo(x - innerSize, y + innerSize);
+        navCtx.lineTo(x - size, y);
+        navCtx.lineTo(x - innerSize, y - innerSize);
+        navCtx.closePath();
+        navCtx.fill();
       }
 
       if (!/\d/.test(point.name)) {
-        ctx.fillText(point.name, x + 8, y);
+        navCtx.fillText(point.name, x + 8, y);
       }
     }
   });
@@ -550,67 +552,46 @@ function drawNavData() {
     const { x, y } = latLonToPixel(vor.lat, vor.lon);
 
     // Draw the core VOR symbol (a hexagon).
-    drawVorSymbol(ctx, x, y, size);
-    ctx.fillText(vor.id, x + 8, y);
+    drawVorSymbol(navCtx, x, y, size);
+    navCtx.fillText(vor.id, x + 8, y);
 
     // If the navaid has DME capability (type includes 'D'), draw a square box around it.
     if (vor.type[1] === 'D') {
       const boxSize = size * 2.5;
-      ctx.strokeStyle = "rgba(0, 255, 0, 0.7)";
-      ctx.lineWidth = 1.5;
-      ctx.strokeRect(x - boxSize / 2, y - boxSize / 2, boxSize, boxSize);
+      navCtx.strokeStyle = "rgba(0, 255, 0, 0.7)";
+      navCtx.lineWidth = 1.5;
+      navCtx.strokeRect(x - boxSize / 2, y - boxSize / 2, boxSize, boxSize);
     }
   });
 }
 
-/**
- * The main animation loop of the application.
- * This function is called by the browser on every frame (typically 60 times per second).
- * @param {number} currentTime - The current high-resolution timestamp provided by the browser.
- */
 function gameLoop(currentTime) {
-  // --- Calculate Delta Time ---
-  // This ensures that aircraft movement is smooth and independent of the frame rate.
   if (lastUpdateTime === 0) {
     lastUpdateTime = currentTime;
   }
   const deltaTimeMs = currentTime - lastUpdateTime;
   lastUpdateTime = currentTime;
 
-  // --- Update Aircraft Positions ---
-  // The master `aircraftList` is updated on every frame for smooth animation of heading, speed, etc.
-  aircraftList.forEach(plane => plane.update(deltaTimeMs / 1000)); // deltaTime needs to be in seconds
+  aircraftList.forEach(plane => plane.update(deltaTimeMs / 1000));
 
-  // --- Radar Sweep Effect ---
-  // To simulate a radar sweep, we only "paint" a snapshot of the aircraft positions
-  // to the screen at a fixed interval (SWEEP_INTERVAL_MS).
   timeSinceLastSweep += deltaTimeMs;
   if (timeSinceLastSweep >= SWEEP_INTERVAL_MS) {
-    // Create a deep copy of the aircraft list to be displayed until the next sweep.
     displayedAircraft = aircraftList.map(p => Object.assign(new Aircraft(), p));
-    timeSinceLastSweep -= SWEEP_INTERVAL_MS; // Reset the sweep timer.
+    timeSinceLastSweep -= SWEEP_INTERVAL_MS;
   }
 
-  // --- Drawing ---
-  // On each frame, the canvas is cleared and redrawn.
-  ctx.clearRect(0, 0, canvas.width, canvas.height); // Clear the entire canvas.
-  drawNavData(); // Draw the static navigation elements first (runways, waypoints).
-  displayedAircraft.forEach(plane => plane.draw()); // Draw the "swept" aircraft positions on top.
+  // --- OPTIMIZED DRAWING ---
+  // 1. Clear only the top (aircraft) canvas. The bottom canvas is untouched.
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  // 2. Draw the aircraft on the transparent top canvas.
+  displayedAircraft.forEach(plane => plane.draw());
 
-  // --- Loop ---
-  // Request the next animation frame to continue the loop.
   requestAnimationFrame(gameLoop);
 }
 
 // ================================================================================= //
-//                                   NAVIGATION DATABASE LOADER                                     //
+//                                   NAVIGATION DATABASE LOADER                      //
 // ================================================================================= //
-/**
- * Asynchronously loads navigation data from the SQLite database.
- * This function uses SQL.js to execute queries against a local .s3db file.
- * It populates the global state arrays (navDataPoints, airports, etc.)
- * with data relevant to the current map view.
- */
 function loadNavData() {
   // Define paths for the SQL.js WebAssembly file and the SQLite database file.
   const wasmPath = 'node_modules/sql.js/dist/sql-wasm.wasm';
@@ -812,6 +793,8 @@ function loadNavData() {
           }
 
           dbObject.close();
+
+          drawNavData();
         });
     })
     .catch(err => {
@@ -820,7 +803,7 @@ function loadNavData() {
 }
 
 // ================================================================================= //
-//                                     USER INPUT & EVENT LISTENERS                                   //
+//                                     USER INPUT & EVENT LISTENERS                  //
 // ================================================================================= //
 window.addEventListener("resize", resizeCanvas);
 
@@ -834,15 +817,19 @@ canvas.addEventListener("click", (e) => {
   const rect = canvas.getBoundingClientRect();
   const mouseX = e.clientX - rect.left;
   const mouseY = e.clientY - rect.top;
+
   aircraftList.forEach((plane) => {
-    const dx = plane.x - mouseX;
-    const dy = plane.y - mouseY;
+    // Get the plane's current pixel position for the click check.
+    const { x, y } = latLonToPixel(plane.lat, plane.lon);
+    const dx = x - mouseX;
+    const dy = y - mouseY;
     if (Math.sqrt(dx * dx + dy * dy) < 10) {
       selectedAircraft = plane;
       document.getElementById("selected-aircraft-info").innerHTML = `<p>${plane.callsign}</p>`;
       headingInput.value = plane.targetHdg;
       speedInput.value = plane.targetSpd;
-      altitudeInput.value = plane.targetAlt;
+      // CHANGED: Display the target altitude in the input box as a Flight Level.
+      altitudeInput.value = plane.targetAlt / 100;
     }
   });
 });
@@ -853,15 +840,17 @@ canvas.addEventListener("contextmenu", (e) => {
   const rect = canvas.getBoundingClientRect();
   const mouseX = e.clientX - rect.left;
   const mouseY = e.clientY - rect.top;
+
   aircraftList.forEach((plane) => {
-    const dx = plane.x - mouseX;
-    const dy = plane.y - mouseY;
+    // NEW: Get the plane's current pixel position for the click check.
+    const { x, y } = latLonToPixel(plane.lat, plane.lon);
+    const dx = x - mouseX;
+    const dy = y - mouseY;
     if (Math.sqrt(dx * dx + dy * dy) < 10) {
       selectedAircraft = plane;
       plane.tagAngle += Math.PI / 4; // Cycle through 8 positions
       // Redraw immediately to show the change
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      drawNavData();
       displayedAircraft = aircraftList.map(p => Object.assign(new Aircraft(), p));
       displayedAircraft.forEach(plane => plane.draw());
     }
@@ -898,22 +887,30 @@ speedInput.addEventListener("keydown", (e) => {
 });
 
 altitudeInput.addEventListener("keydown", (e) => {
-  handleCommandInput(e, (val) => selectedAircraft.setAltitude(val));
+  handleCommandInput(e, (val) => selectedAircraft.setAltitude(val * 100));
 });
 
 // ================================================================================= //
-//                                          APPLICATION START                                          //
+//                                          APPLICATION START                        //
 // ================================================================================= //
-// --- Initial Setup & Execution Order ---
 
-// Add some dummy aircraft for testing and demonstration purposes.
-aircraftList.push(new Aircraft("BAW123", 100, 100, 135, 180, 230));
-aircraftList.push(new Aircraft("AWE456", 700, 600, 225, 160, 160));
+// 1. Define the geographic area.
+calculateGeographicBounds();
+// 2. Size the canvases to fit the window. This MUST happen before anything else.
+resizeCanvas();
+
+// NEW: Use the pixelToLatLon helper to set the initial positions.
+// This ensures they start in the correct geographical spot.
+const initialPos1 = pixelToLatLon(100, 100);
+const initialPos2 = pixelToLatLon(700, 600);
+
+aircraftList.push(new Aircraft("BAW123", initialPos1.lat, initialPos1.lon, 135, 18000, 230));
+aircraftList.push(new Aircraft("AWE456", initialPos2.lat, initialPos2.lon, 225, 16000, 160));
 displayedAircraft = aircraftList.map(p => Object.assign(new Aircraft(), p));
 selectedAircraft = aircraftList[0];
 
-// The application starts by following these steps in order:
-calculateGeographicBounds(); // 1. Define the geographic area to be displayed.
-loadNavData();             // 2. Asynchronously load all nav data for that area from the database.
-resizeCanvas();              // 3. Size the canvas to fit the window and calculate scale.
-requestAnimationFrame(gameLoop); // 4. Start the main animation loop.
+
+// 3. Asynchronously load all nav data. This will trigger the one-time draw when complete.
+loadNavData();
+// 4. Start the main animation loop.
+requestAnimationFrame(gameLoop);

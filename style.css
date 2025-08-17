@@ -14,24 +14,37 @@ html {
   align-items: center;
   width: 100vw; /* 100% of viewport width */
   height: 100vh; /* 100% of viewport height */
-  /*gap: 10px; */
   box-sizing: border-box; /* Include padding in width/height calculation */
 }
 
-#radar-scope {
-  /* The canvas size is now controlled by JavaScript */
-  background-color: #000;
-  border: 1px solid #0f0;
-  margin: 0px;
+#canvas-stack {
+  position: relative;
   margin-right: 10px; /* Space between radar and panel */
 }
 
+#navdata-canvas,
+#radar-scope {
+  position: absolute;
+  top: 0;
+  left: 0;
+  border: 1px solid #0f0;
+}
+
+#navdata-canvas {
+  background-color: #000;
+  z-index: 1;
+}
+
+#radar-scope {
+  background-color: transparent;
+  z-index: 2;
+}
+
+
 #ui-panel {
   width: 200px;
-  /*height: fit-content; /* Make panel only as tall as its content */
   border: 1px solid #0f0;
   padding: 10px;
-  /*flex-shrink: 0; /* Prevent the panel from shrinking */
 }
 
 #commands {
