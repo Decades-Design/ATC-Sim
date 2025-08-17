@@ -1,4 +1,6 @@
-// --- GLOBAL VARIABLES ---
+// ================================================================================= //
+//                                    UI & CANVAS ELEMENT GLOBALS                                    //
+// ================================================================================= //
 const canvas = document.getElementById("radar-scope");
 const ctx = canvas.getContext("2d"); // The drawing tool for the canvas
 const uiPanel = document.getElementById("ui-panel");
@@ -6,33 +8,47 @@ const headingInput = document.getElementById("heading-input");
 const speedInput = document.getElementById("speed-input");
 const altitudeInput = document.getElementById("altitude-input");
 
-// --- SIMULATION SETTINGS ---
+// ================================================================================= //
+//                                      CORE SIMULATION SETTINGS                                     //
+// ================================================================================= //
 const centerCoord = { lat: 45.44944444, lon: 9.27833333 }; // Centre coordinates
 const radarRangeNM = 30; // The distance from the center to the edge of the screen in nautical miles
 
+// This object defines which airports and runways are currently active and should be rendered.
+// This is a key setting for defining the playable area.
 const activeAirports = {
   "LIML": ["RW35"],
   "LIMC": ["RW35R"]
 };
 
+// The time in milliseconds for a full radar sweep. This controls the refresh rate of aircraft positions.
 const SWEEP_INTERVAL_MS = 2000;
 
-// --- GEOGRAPHICAL CONSTANTS AND HELPERS ---
-const NM_TO_KM = 1.852;
-const KNOTS_TO_KPS = 0.000514444;
-const FEET_TO_KM = 0.0003048;
+// ================================================================================= //
+//                                 GEOGRAPHICAL CONSTANTS & HELPERS                                  //
+// ================================================================================= //
+const NM_TO_KM = 1.852; // Nautical Miles to Kilometers
+const KNOTS_TO_KPS = 0.000514444; // Knots (nautical miles per hour) to Kilometers Per Second
+const FEET_TO_KM = 0.0003048; // Feet to Kilometers
 
-// These will be calculated dynamically based on the center and range
+// These global variables will define the geographic bounding box for the radar scope.
+// They are calculated by `calculateGeographicBounds` before loading data.
 let minLon, maxLon, minLat, maxLat;
 
+/**
+ * Calculates the max/min latitude and longitude based on the simulation's center point and radar range.
+ * This defines the rectangular area for which navigation data will be queried.
+ * This is a simplified calculation and works best for areas not too close to the poles.
+ */
 function calculateGeographicBounds() {
     const radarRangeKm = radarRangeNM * NM_TO_KM;
     const centerLatRad = centerCoord.lat * Math.PI / 180;
 
-    // Calculate the change in latitude and longitude for the given range
-    const latDelta = radarRangeKm / 111.32; // Approx km per degree of latitude
-    const lonDelta = radarRangeKm / (111.32 * Math.cos(centerLatRad)); // Varies with latitude
+    // Calculate the approximate change in latitude and longitude for the given radar range.
+    const latDelta = radarRangeKm / 111.32; // Approx 111.32 km per degree of latitude.
+    const lonDelta = radarRangeKm / (111.32 * Math.cos(centerLatRad)); // Longitude delta depends on latitude.
 
+    // Set the global bounding box variables.
     minLat = centerCoord.lat - latDelta;
     maxLat = centerCoord.lat + latDelta;
     minLon = centerCoord.lon - lonDelta;
@@ -40,64 +56,101 @@ function calculateGeographicBounds() {
 }
 
 
-// --- Settings ---
-canvas.addEventListener("contextmenu", (e) => {
-  e.preventDefault();
-});
+// ================================================================================= //
+//                                          GAME STATE                                               //
+// ================================================================================= //
+let aircraftList = []; // The master list of all aircraft in the simulation.
+let navDataPoints = []; // Holds all en-route waypoints loaded from the database.
+let vorData = []; // Holds all VOR navaids loaded from the database.
+let airports = []; // Holds all airport data loaded from the database.
+let terminalWaypoints = []; // Holds all terminal waypoints (SIDs/STARs) loaded from the database.
+let runways = []; // Holds all runway data loaded from the database.
+let ilsData = []; // Holds all ILS (localizer/glideslope) data loaded from the database.
+let approachPaths = []; // Holds all instrument approach procedure data.
+let selectedAircraft = null; // The aircraft currently selected by the user.
+let radarRadius; // The radius of the radar scope in pixels, calculated on resize.
+let kmPerPixel; // The ratio of kilometers to pixels, used for converting real-world distances to screen distances.
 
-// --- GAME STATE ---
-let aircraftList = [];
-let navDataPoints = []; // Will hold navigation data points
-let vorData = []; // Will hold VOR data loaded from the database
-let airports = []; // Will hold airport data loaded from the database
-let terminalWaypoints = []; // Will hold terminal waypoint data loaded from the database
-let runways = []; // Will hold runway data loaded from the database
-let ilsData = []; // Will hold ILS data loaded from the database
-let approachPaths = []; // Will hold approach path data loaded from the database
-let selectedAircraft = null;
-let radarRadius;
-let kmPerPixel;
+// ================================================================================= //
+//                                    TIMING & ANIMATION STATE                                       //
+// ================================================================================= //
+let lastUpdateTime = 0; // The timestamp of the last frame update.
+let timeSinceLastSweep = 0; // Time accumulator for the radar sweep effect.
+let displayedAircraft = []; // A 'frozen' snapshot of aircraft states, updated every sweep.
 
-// --- TIMING & ANIMATION STATE ---
-let lastUpdateTime = 0;
-let timeSinceLastSweep = 0;
-let displayedAircraft = [];
-
-// --- CLASSES FOR GAME OBJECTS ---
-
+// ================================================================================= //
+//                                     AIRCRAFT CLASS DEFINITION                                      //
+// ================================================================================= //
 class Aircraft {
+  /**
+   * Represents a single aircraft in the simulation.
+   * @param {string} callsign - The aircraft's unique identifier.
+   * @param {number} x - The initial X-coordinate on the canvas.
+   * @param {number} y - The initial Y-coordinate on the canvas.
+   * @param {number} heading - The initial heading in degrees.
+   * @param {number} altitude - The initial altitude in feet.
+   * @param {number} speed - The initial speed in knots.
+   * @param {number} [tagAngle=0] - The initial angle for the data tag, in radians.
+   */
   constructor(callsign, x, y, heading, altitude, speed, tagAngle) {
     this.callsign = callsign;
-    this.x = x;
-    this.y = y;
-    this.heading = heading, this.targetHdg = heading;
-    this.altitude = altitude, this.targetAlt = altitude;
-    this.speed = speed, this.targetSpd = speed;
-    this.tagAngle = tagAngle || 0;
+    this.x = x; // Canvas x-position
+    this.y = y; // Canvas y-position
+
+    // Current and target values for aircraft parameters.
+    // The 'target' values are what the simulation smoothly interpolates towards.
+    this.heading = heading;
+    this.targetHdg = heading;
+    this.altitude = altitude;
+    this.targetAlt = altitude;
+    this.speed = speed;
+    this.targetSpd = speed;
+
+    this.tagAngle = tagAngle || 0; // Angle for the data tag placement
   }
 
+  /**
+   * Updates the aircraft's position based on its speed, heading, and the time elapsed.
+   * @param {number} deltaTime - The time in seconds since the last update.
+   */
   update(deltaTime) {
-    if (!kmPerPixel) return;
+    if (!kmPerPixel) return; // Don't update if the scale isn't set yet.
+
+    // 1. Convert speed from knots to kilometers per second.
     const speedInKps = this.speed * KNOTS_TO_KPS;
+    // 2. Calculate distance moved in kilometers.
     const distanceMovedKm = speedInKps * deltaTime;
+    // 3. Convert distance from kilometers to pixels.
     const distanceMovedPx = distanceMovedKm / kmPerPixel;
+    // 4. Convert heading to radians for trigonometric functions.
     const rad = this.heading * Math.PI / 180;
+
+    // 5. Update x and y coordinates.
+    //    - Sine is used for the x-component because 0 degrees is North (up).
+    //    - Cosine is used for the y-component, and subtracted because y decreases upwards.
     this.x += Math.sin(rad) * distanceMovedPx;
     this.y -= Math.cos(rad) * distanceMovedPx;
   }
 
+  /**
+   * Draws the aircraft and its associated data on the canvas.
+   */
   draw() {
+    // --- Draw the aircraft symbol (a circle) ---
     ctx.beginPath();
     ctx.arc(this.x, this.y, 4, 0, 2 * Math.PI);
     ctx.globalAlpha = 1;
-    ctx.fillStyle = "#0f0";
+    ctx.fillStyle = "#0f0"; // Bright green
     ctx.fill();
     ctx.globalAlpha = 1;
 
-    const lineTimeLength = 60;
+    // --- Draw the speed vector line ---
+    // This line indicates the aircraft's heading and speed.
+    // Its length represents the distance the aircraft will travel in a set time (e.g., 60 seconds).
+    const lineTimeLength = 60; // seconds
     const speedInKps = this.speed * KNOTS_TO_KPS;
     const distanceKm = speedInKps * lineTimeLength;
-    const lineLength = distanceKm / kmPerPixel;
+    const lineLength = distanceKm / kmPerPixel; // Convert distance to pixels
     const rad = (this.heading * Math.PI) / 180;
     const endX = this.x + Math.sin(rad) * lineLength;
     const endY = this.y - Math.cos(rad) * lineLength;
@@ -108,8 +161,10 @@ class Aircraft {
     ctx.lineWidth = 2;
     ctx.stroke();
 
+    // --- Draw the data tag (callsign, altitude, speed) ---
     ctx.font = '12px "Courier New"';
-    const tagRadius = 40;
+    const tagRadius = 40; // Distance from the aircraft symbol
+    // Calculate tag position based on the tagAngle
     const tagX = this.x + tagRadius * Math.cos(this.tagAngle);
     const tagY = this.y + tagRadius * Math.sin(this.tagAngle);
     ctx.textAlign = "center";
@@ -118,43 +173,63 @@ class Aircraft {
     ctx.fillText(`${Math.round(this.altitude)}  ${Math.round(this.speed)}`, tagX, tagY + 8);
   }
 
+  /**
+   * Smoothly changes the aircraft's heading to a new value.
+   * @param {number} newHeading - The target heading in degrees.
+   */
   setHeading(newHeading) {
-    if (this._headingInterval) clearInterval(this._headingInterval);
+    if (this._headingInterval) clearInterval(this._headingInterval); // Stop any existing turn.
+
+    // Helper to keep heading values between 0 and 360.
     const normalize = h => ((h % 360) + 360) % 360;
     const current = normalize(this.heading);
     this.targetHdg = normalize(newHeading);
     let diff = this.targetHdg - current;
     if (diff > 180) diff -= 360;
     if (diff < -180) diff += 360;
-    const turnRate = 2;
-    const intervalMs = 30;
-    const step = turnRate * (intervalMs / 1000) * Math.sign(diff);
+    const turnRate = 2; // Degrees per second
+    const intervalMs = 30; // Update interval in milliseconds
+    const step = turnRate * (intervalMs / 1000) * Math.sign(diff); // Degrees to turn in each step
+
+    // Use an interval to incrementally change the heading.
     this._headingInterval = setInterval(() => {
       let cur = normalize(this.heading);
       let d = this.targetHdg - cur;
+      // Ensure we're turning the shortest way
       if (d > 180) d -= 360;
       if (d < -180) d += 360;
+
+      // If the remaining turn is smaller than a step, just snap to the target.
       if (Math.abs(d) <= Math.abs(step)) {
         this.heading = this.targetHdg;
         clearInterval(this._headingInterval);
         this._headingInterval = null;
       } else {
-        this.heading = normalize(cur + step);
+        this.heading = normalize(cur + step); // Turn by one step
       }
     }, intervalMs);
   }
 
+  /**
+   * Smoothly changes the aircraft's speed to a new value using ease-in-out interpolation.
+   * @param {number} newSpeed - The target speed in knots.
+   */
   setSpeed(newSpeed) {
     if (this._speedInterval) clearInterval(this._speedInterval);
     this.targetSpd = newSpeed;
     const initialSpeed = this.speed;
+    // Duration of the speed change is proportional to the difference in speed.
     const duration = Math.abs(newSpeed - this.speed) * 200;
     const startTime = Date.now();
+
     this._speedInterval = setInterval(() => {
       const elapsed = Date.now() - startTime;
-      const t = Math.min(elapsed / duration, 1);
+      const t = Math.min(elapsed / duration, 1); // Normalized time (0 to 1)
+      // Apply a smoothstep function for ease-in-out effect.
       const smoothT = t * t * (3 - 2 * t);
       this.speed = initialSpeed + (newSpeed - initialSpeed) * smoothT;
+
+      // Stop when duration is reached or we're close enough.
       if (t >= 1 || Math.abs(this.speed - newSpeed) < 0.5) {
         this.speed = newSpeed;
         clearInterval(this._speedInterval);
@@ -163,17 +238,26 @@ class Aircraft {
     }, 30);
   }
 
+  /**
+   * Smoothly changes the aircraft's altitude to a new value using ease-in-out interpolation.
+   * @param {number} newAltitude - The target altitude in feet.
+   */
   setAltitude(newAltitude) {
     if (this._altitudeInterval) clearInterval(this._altitudeInterval);
     this.targetAlt = newAltitude;
     const initialAltitude = this.altitude;
+    // Duration of the altitude change is proportional to the difference.
     const duration = Math.abs(newAltitude - this.altitude) * 600;
     const startTime = Date.now();
+
     this._altitudeInterval = setInterval(() => {
       const elapsed = Date.now() - startTime;
-      const t = Math.min(elapsed / duration, 1);
+      const t = Math.min(elapsed / duration, 1); // Normalized time (0 to 1)
+      // Apply a smoothstep function for ease-in-out effect.
       const smoothT = t * t * (3 - 2 * t);
       this.altitude = initialAltitude + (newAltitude - initialAltitude) * smoothT;
+
+      // Stop when duration is reached or we're close enough.
       if (t >= 1 || Math.abs(this.altitude - newAltitude) < 1) {
         this.altitude = newAltitude;
         clearInterval(this._altitudeInterval);
@@ -183,7 +267,9 @@ class Aircraft {
   }
 }
 
-// --- CORE FUNCTIONS ---
+// ================================================================================= //
+//                                     CANVAS & DRAWING FUNCTIONS                                     //
+// ================================================================================= //
 function resizeCanvas() {
   const padding = 20;
   const gap = 10;
@@ -226,126 +312,131 @@ function latLonToPixel(lat, lon) {
   return { x, y };
 }
 
+/**
+ * Draws all static navigation data on the canvas.
+ * This includes runways, ILS localizers, waypoints, and VORs.
+ * This function is called on every frame to ensure the nav data is always visible.
+ */
 function drawNavData() {
+  // --- Set default drawing styles for nav data ---
   ctx.fillStyle = "rgba(0, 255, 0, 0.7)";
   ctx.strokeStyle = "rgba(0, 255, 0, 0.7)";
   ctx.font = '11px "Courier New"';
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
 
-    // --- Runways ---
-  const drawnRunways = new Set(); // Keep track of runways we've already drawn
+  // --- Draw Runways ---
+  // A Set is used to prevent drawing the same physical runway twice (e.g., RW18 and RW36 are the same pavement).
+  const drawnRunways = new Set();
   runways.forEach(runway => {
+    // Only draw runways that are part of an active airport and haven't been drawn yet.
     if (activeAirports[runway.airport] && activeAirports[runway.airport].includes(runway.id) && !drawnRunways.has(runway.id)) {
-      
-      // 1. Get the starting point (the threshold) in pixel coordinates.
-      const p1 = latLonToPixel(runway.lat, runway.lon);
-      let p2; // This will hold the coordinates of the other end.
 
-      // 2. Try to find the opposite runway to get the most accurate endpoint.
+      // --- Determine Runway Endpoints ---
+      // The goal is to find the pixel coordinates for both ends of the runway pavement.
+      const p1 = latLonToPixel(runway.lat, runway.lon); // Start point is the runway's own threshold.
+      let p2; // The other end of the runway.
+
+      // The most accurate way to get the other end is to find the reciprocal runway in the database.
       const rwyNum = parseInt(runway.id.substring(2, 4));
-      const oppositeNum = rwyNum > 18 ? rwyNum - 18 : rwyNum + 18;
-      const rwySide = runway.id.substring(4);
+      const oppositeNum = rwyNum > 18 ? rwyNum - 18 : rwyNum + 18; // e.g., 35 -> 17, 09 -> 27
+      const rwySide = runway.id.substring(4); // e.g., 'L', 'R', 'C'
       let oppositeSide = '';
       if (rwySide === 'L') oppositeSide = 'R';
       if (rwySide === 'R') oppositeSide = 'L';
       if (rwySide === 'C') oppositeSide = 'C';
-      
+
       const oppositeId = `RW${String(oppositeNum).padStart(2, '0')}${oppositeSide}`;
       const oppositeRunway = runways.find(r => r.id === oppositeId && r.airport === runway.airport);
 
       if (oppositeRunway) {
-        // --- Primary Method ---
-        // If the opposite runway is found, use its precise threshold coordinates.
+        // --- Primary Method: Use Reciprocal Runway's Coordinates ---
         p2 = latLonToPixel(oppositeRunway.lat, oppositeRunway.lon);
-        drawnRunways.add(oppositeRunway.id); // Mark the opposite as drawn as well.
+        drawnRunways.add(oppositeRunway.id); // Mark the reciprocal runway as drawn too.
       } else {
-        // --- Backup Method ---
-        // If no opposite is found, calculate the endpoint using length and bearing.
-        const lengthPx = (runway.length * FEET_TO_KM) / kmPerPixel;
+        // --- Backup Method: Calculate Endpoint using Length and Bearing ---
+        // This is less accurate than using the reciprocal runway's data but is a reliable fallback.
+        const lengthPx = (runway.length * FEET_TO_KM) / kmPerPixel; // Convert runway length to pixels
         const bearingRad = runway.trueBearing * Math.PI / 180;
-        
-        // Calculate the end point using the correct navigational trigonometry.
+
+        // Calculate the end point using trigonometry.
         p2 = {
           x: p1.x + Math.sin(bearingRad) * lengthPx,
-          y: p1.y - Math.cos(bearingRad) * lengthPx
+          y: p1.y - Math.cos(bearingRad) * lengthPx // Y is inverted in canvas coordinates
         };
       }
 
-      // 3. Draw the runway using the determined start and end points.
-      // This part is now the same for both methods.
+      // --- Draw the Runway Line ---
       ctx.beginPath();
       ctx.moveTo(p1.x, p1.y);
       ctx.lineTo(p2.x, p2.y);
-      
-      ctx.strokeStyle = "rgba(255, 255, 255, 1)"; // Pure white
+      ctx.strokeStyle = "rgba(255, 255, 255, 1)"; // Draw runways in pure white for high visibility.
       ctx.lineWidth = 4;
       ctx.stroke();
 
-      // 4. Mark this runway as drawn.
+      // Mark the current runway as drawn to avoid re-processing.
       drawnRunways.add(runway.id);
     }
   });
 
-  // --- Localizer ---
+  // --- Draw ILS Localizers ---
+  // This section draws the extended centerline for runways with an active ILS.
   ilsData.forEach(ils => {
-    // OLD LINE: if (activeRunways.includes(ils.runway) && controlledAirports.includes(ils.airport)) {
-    // --- NEW LOGIC (replace the line above with this) ---
+    // Check if the ILS corresponds to an active runway at an active airport.
     if (activeAirports[ils.airport] && activeAirports[ils.airport].includes(ils.runway)) {
-      // Find the runway that this ILS belongs to.
       const runway = runways.find(r => r.id === ils.runway && r.airport === ils.airport);
-      if (!runway) return; // Safety check in case the runway isn't found.
+      if (!runway) return; // Safety check: Can't draw ILS if its runway isn't loaded.
 
-      // Get the pixel coordinates for the runway threshold.
       const threshold = latLonToPixel(runway.lat, runway.lon);
 
-      // 1. Calculate the TRUE bearing for the ILS.
-      // The database bearing is magnetic, so we add declination to get true north.
+      // 1. Calculate the TRUE bearing for the localizer.
+      // The database provides magnetic bearing, so we must add declination to get the true bearing.
       const trueBearing = ils.bearing + ils.declination;
       const bearingRad = trueBearing * Math.PI / 180;
 
-      // 2. Define the length of the localizer line (e.g., 10 NM).
-      // --- Filter approachPaths for waypointType[3] === "B"
+      // 2. Determine the length of the localizer line to draw.
+      // This is a complex part: we try to find the Initial Approach Fix (IAF)
+      // from the approach path data to draw the line out to that point.
+      // If we can't find it, we default to a fixed length (e.g., 15 NM).
+
+      // Filter approach paths for the current airport that are of a specific type ("B").
       const bTypeApproaches = approachPaths.filter(ap => ap.waypointType && ap.waypointType[3] === "B" && ap.icao === ils.airport);
-
-      // --- Cut first two characters from runway id (e.g., "RW35L" -> "35L")
-      const cutRunway = runway.id.substring(2);
-
-      // --- Further filter for approaches whose id contains the cut runway string
+      const cutRunway = runway.id.substring(2); // e.g., "RW35L" -> "35L"
       const matchingApproaches = bTypeApproaches.filter(ap => ap.id && ap.id.includes(cutRunway));
       
       let locLengthPx;
       if (matchingApproaches.length > 0) {
-        // Count occurrences of each waypointId
+        // --- Dynamic Length Calculation ---
+        // This logic finds the most common initial waypoint for the approach
+        // and calculates the distance to it. This makes the localizer line length
+        // more realistic and data-driven.
+
+        // Count occurrences of each potential starting waypoint ID.
         const idCounts = {};
         matchingApproaches.forEach(ap => {
           idCounts[ap.waypointId] = (idCounts[ap.waypointId] || 0) + 1;
         });
-        // Find the most common waypointId(s)
+
+        // Find the most frequently occurring waypoint ID(s).
         let mostCommonIds = [];
         let maxCount = 0;
         for (const id in idCounts) {
           if (idCounts[id] > maxCount) {
-        maxCount = idCounts[id];
-        mostCommonIds = [id];
+            maxCount = idCounts[id];
+            mostCommonIds = [id];
           } else if (idCounts[id] === maxCount) {
-        mostCommonIds.push(id);
+            mostCommonIds.push(id);
           }
         }
-        // Prefer waypointIds that do not contain numbers
+
+        // Prefer waypoints that don't contain numbers, as they are often named fixes.
         let preferredIds = mostCommonIds.filter(id => !/\d/.test(id));
-        let chosenId;
-        if (preferredIds.length > 0) {
-          chosenId = preferredIds[0];
-        } else {
-          chosenId = mostCommonIds[0];
-        }
-        // Filter to only approaches with the chosen waypointId
-        const filtered = matchingApproaches.filter(ap => ap.waypointId === chosenId);
-        console.log("Filtered approaches:", filtered.map(ap => ap.waypointId));
-        // Use the first (they all have the same waypointId now)
-        const ap = filtered[0];
-        // Calculate distance from threshold to waypoint (in km)
+        let chosenId = preferredIds.length > 0 ? preferredIds[0] : mostCommonIds[0];
+
+        // Get the approach data for the chosen waypoint.
+        const ap = matchingApproaches.find(ap => ap.waypointId === chosenId);
+
+        // Calculate the distance from the runway threshold to this waypoint using the Haversine formula.
         const R = 6371; // Earth radius in km
         const toRad = deg => deg * Math.PI / 180;
         const dLat = toRad(ap.waypointLat - runway.lat);
@@ -355,180 +446,194 @@ function drawNavData() {
                   Math.sin(dLon / 2) ** 2;
         const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
         const distKm = R * c;
-        locLengthPx = distKm / kmPerPixel;
+        locLengthPx = distKm / kmPerPixel; // Convert distance to pixels.
       } else {
+        // --- Fallback Length ---
+        // If no matching approach path is found, use a default length of 15 NM.
         locLengthPx = (15 * NM_TO_KM) / kmPerPixel;
       }
 
-      // 3. Calculate the end point of the line.
-      // We start at the threshold and go "backwards" along the approach path.
-      // This uses the correct navigational-to-canvas coordinate conversion.
+      // 3. Calculate the end point of the localizer line.
+      // We start at the runway threshold and extend "backwards" along the approach course.
       const endX = threshold.x - Math.sin(bearingRad) * locLengthPx;
       const endY = threshold.y + Math.cos(bearingRad) * locLengthPx;
 
-      // 4. Draw the line.
+      // 4. Draw the localizer line.
       ctx.beginPath();
       ctx.moveTo(threshold.x, threshold.y); // Start at the runway threshold.
       ctx.lineTo(endX, endY);               // Extend out along the approach course.
-      
       ctx.strokeStyle = "rgba(255, 255, 0, 0.7)"; // Yellow for ILS
       ctx.lineWidth = 3;
       ctx.stroke();
     }
   });
 
+  // --- Draw En-route Waypoints ---
+  // These are waypoints not associated with a specific airport's terminal area.
   navDataPoints.forEach(point => {
-    const x = ((point.lon - minLon) / (maxLon - minLon)) * canvas.width;
-    const y = ((maxLat - point.lat) / (maxLat - minLat)) * canvas.height;
+    const { x, y } = latLonToPixel(point.lat, point.lon);
 
+    // Draw different shapes based on the waypoint type.
     if (point.type[0] === 'C' || point.type[0] === 'R') {
-      const size = 6; // You can adjust this value or make it a parameter
+      // 'C' and 'R' types are drawn as triangles.
+      const size = 6;
       ctx.beginPath();
-      ctx.moveTo(x, y - size * 0.75); // Top point (75% of size)
+      ctx.moveTo(x, y - size * 0.75); // Top point
       ctx.lineTo(x - size * 0.6, y + size * 0.45); // Bottom left
       ctx.lineTo(x + size * 0.6, y + size * 0.45); // Bottom right
       ctx.closePath();
       ctx.fill();
     } else if (point.type[0] === 'W') {
-      const size = 5; // Size of the star
+      // 'W' type (standard waypoint) is drawn as a star.
+      const size = 5;
       const innerSize = size / 2.5;
       ctx.beginPath();
-      
-      // 1. Top point
-      ctx.moveTo(x, y - size);
-      // 2. Inner point (top-right)
-      ctx.lineTo(x + innerSize, y - innerSize);
-      // 3. Right point
-      ctx.lineTo(x + size, y);
-      // 4. Inner point (bottom-right)
-      ctx.lineTo(x + innerSize, y + innerSize);
-      // 5. Bottom point
-      ctx.lineTo(x, y + size);
-      // 6. Inner point (bottom-left)
-      ctx.lineTo(x - innerSize, y + innerSize);
-      // 7. Left point
-      ctx.lineTo(x - size, y);
-      // 8. Inner point (top-left)
-      ctx.lineTo(x - innerSize, y - innerSize);
-
+      ctx.moveTo(x, y - size); // Top point
+      ctx.lineTo(x + innerSize, y - innerSize); // Inner top-right
+      ctx.lineTo(x + size, y); // Right point
+      ctx.lineTo(x + innerSize, y + innerSize); // Inner bottom-right
+      ctx.lineTo(x, y + size); // Bottom point
+      ctx.lineTo(x - innerSize, y + innerSize); // Inner bottom-left
+      ctx.lineTo(x - size, y); // Left point
+      ctx.lineTo(x - innerSize, y - innerSize); // Inner top-left
       ctx.closePath();
       ctx.fill();
     }
 
-    // Only display name if it does NOT contain a number
+    // Only display the waypoint name if it doesn't contain numbers (filters out runway-specific fixes).
     if (!/\d/.test(point.name)) {
       ctx.fillText(point.name, x + 8, y);
     }
   });
 
   // --- Draw Terminal Waypoints ---
+  // These are waypoints associated with a specific airport (e.g., for SIDs and STARs).
   terminalWaypoints.forEach(point => {
+    // Only draw waypoints for active airports and filter out numeric/unnamed ones.
     if (activeAirports[point.airport] && !/\d/.test(point.name)) {
-      const x = ((point.lon - minLon) / (maxLon - minLon)) * canvas.width;
-      const y = ((maxLat - point.lat) / (maxLat - minLat)) * canvas.height;
+      const { x, y } = latLonToPixel(point.lat, point.lon);
 
+      // Draw the same triangle/star symbols as en-route waypoints.
       if (point.type[0] === 'C' || point.type[0] === 'R') {
-        const size = 6; // You can adjust this value or make it a parameter
+        const size = 6;
         ctx.beginPath();
-        ctx.moveTo(x, y - size * 0.75); // Top point (75% of size)
-        ctx.lineTo(x - size * 0.6, y + size * 0.45); // Bottom left
-        ctx.lineTo(x + size * 0.6, y + size * 0.45); // Bottom right
+        ctx.moveTo(x, y - size * 0.75);
+        ctx.lineTo(x - size * 0.6, y + size * 0.45);
+        ctx.lineTo(x + size * 0.6, y + size * 0.45);
         ctx.closePath();
         ctx.fill();
       } else if (point.type[0] === 'W') {
-        const size = 5; // Size of the star
+        const size = 5;
         const innerSize = size / 2.5;
         ctx.beginPath();
-        
-        // 1. Top point
         ctx.moveTo(x, y - size);
-        // 2. Inner point (top-right)
         ctx.lineTo(x + innerSize, y - innerSize);
-        // 3. Right point
         ctx.lineTo(x + size, y);
-        // 4. Inner point (bottom-right)
         ctx.lineTo(x + innerSize, y + innerSize);
-        // 5. Bottom point
         ctx.lineTo(x, y + size);
-        // 6. Inner point (bottom-left)
         ctx.lineTo(x - innerSize, y + innerSize);
-        // 7. Left point
         ctx.lineTo(x - size, y);
-        // 8. Inner point (top-left)
         ctx.lineTo(x - innerSize, y - innerSize);
-
         ctx.closePath();
         ctx.fill();
       }
 
-      // Only display name if it does NOT contain a number
       if (!/\d/.test(point.name)) {
         ctx.fillText(point.name, x + 8, y);
       }
     }
   });
 
+  // --- Draw VOR/DME Navaids ---
   vorData.forEach(vor => {
-    const size = 5; // Size of the star
+    const size = 5;
+    const { x, y } = latLonToPixel(vor.lat, vor.lon);
 
-    const x = ((vor.lon - minLon) / (maxLon - minLon)) * canvas.width;
-    const y = ((maxLat - vor.lat) / (maxLat - minLat)) * canvas.height;
-
-    // Draw the VOR symbol
+    // Draw the core VOR symbol (a hexagon).
     drawVorSymbol(ctx, x, y, size);
     ctx.fillText(vor.id, x + 8, y);
 
+    // If the navaid has DME capability (type includes 'D'), draw a square box around it.
     if (vor.type[1] === 'D') {
-        const boxSize = size * 2.5;
-        ctx.strokeStyle = "rgba(0, 255, 0, 0.7)";
-        ctx.lineWidth = 1.5;
-        ctx.strokeRect(x - boxSize / 2, y - boxSize / 2, boxSize, boxSize);
+      const boxSize = size * 2.5;
+      ctx.strokeStyle = "rgba(0, 255, 0, 0.7)";
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(x - boxSize / 2, y - boxSize / 2, boxSize, boxSize);
     }
   });
 }
 
+/**
+ * The main animation loop of the application.
+ * This function is called by the browser on every frame (typically 60 times per second).
+ * @param {number} currentTime - The current high-resolution timestamp provided by the browser.
+ */
 function gameLoop(currentTime) {
+  // --- Calculate Delta Time ---
+  // This ensures that aircraft movement is smooth and independent of the frame rate.
   if (lastUpdateTime === 0) {
     lastUpdateTime = currentTime;
   }
   const deltaTimeMs = currentTime - lastUpdateTime;
   lastUpdateTime = currentTime;
 
-  aircraftList.forEach(plane => plane.update(deltaTimeMs / 1000));
+  // --- Update Aircraft Positions ---
+  // The master `aircraftList` is updated on every frame for smooth animation of heading, speed, etc.
+  aircraftList.forEach(plane => plane.update(deltaTimeMs / 1000)); // deltaTime needs to be in seconds
 
+  // --- Radar Sweep Effect ---
+  // To simulate a radar sweep, we only "paint" a snapshot of the aircraft positions
+  // to the screen at a fixed interval (SWEEP_INTERVAL_MS).
   timeSinceLastSweep += deltaTimeMs;
   if (timeSinceLastSweep >= SWEEP_INTERVAL_MS) {
+    // Create a deep copy of the aircraft list to be displayed until the next sweep.
     displayedAircraft = aircraftList.map(p => Object.assign(new Aircraft(), p));
-    timeSinceLastSweep -= SWEEP_INTERVAL_MS;
+    timeSinceLastSweep -= SWEEP_INTERVAL_MS; // Reset the sweep timer.
   }
 
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  displayedAircraft.forEach(plane => plane.draw());
-  drawNavData();
+  // --- Drawing ---
+  // On each frame, the canvas is cleared and redrawn.
+  ctx.clearRect(0, 0, canvas.width, canvas.height); // Clear the entire canvas.
+  drawNavData(); // Draw the static navigation elements first (runways, waypoints).
+  displayedAircraft.forEach(plane => plane.draw()); // Draw the "swept" aircraft positions on top.
 
+  // --- Loop ---
+  // Request the next animation frame to continue the loop.
   requestAnimationFrame(gameLoop);
 }
 
-// --- NAV DATA LOADING ---
+// ================================================================================= //
+//                                   NAVIGATION DATABASE LOADER                                     //
+// ================================================================================= //
+/**
+ * Asynchronously loads navigation data from the SQLite database.
+ * This function uses SQL.js to execute queries against a local .s3db file.
+ * It populates the global state arrays (navDataPoints, airports, etc.)
+ * with data relevant to the current map view.
+ */
 function loadNavData() {
-  // --- Paths ---
+  // Define paths for the SQL.js WebAssembly file and the SQLite database file.
   const wasmPath = 'node_modules/sql.js/dist/sql-wasm.wasm';
   const dbPath = 'NavData/navdb.s3db';
 
-  // --- Initialize SQL.js and Load Database ---
+  // Initialize SQL.js and load the database file.
   initSqlJs({ locateFile: () => wasmPath })
-    .then(function(SQL) {
+    .then(SQL => {
+      // Fetch the database file from the server.
       return fetch(dbPath)
         .then(response => {
           if (!response.ok) {
             throw new Error(`Failed to fetch database: ${response.statusText}`);
           }
-          return response.arrayBuffer();
+          return response.arrayBuffer(); // Get the database file as an ArrayBuffer.
         })
         .then(filebuffer => {
+          // Create a new database instance from the loaded file.
           const dbObject = new SQL.Database(new Uint8Array(filebuffer));
 
-          // --- Load Waypoints ---
+          // --- Load En-route Waypoints ---
+          // Selects all waypoints within the current map's geographical boundaries.
+          // It filters out certain unnamed or problematic waypoints (like 'VP%' or type 'U').
           let query = `
             SELECT * FROM main.tbl_enroute_waypoints 
             WHERE 
@@ -539,15 +644,17 @@ function loadNavData() {
           `;
           const result = dbObject.exec(query);
           if (result.length > 0 && result[0].values.length > 0) {
+            // Map the query results to a more usable array of objects.
             navDataPoints = result[0].values.map(row => ({
-              name: row[2], // ident column
-              type: row[4], // type column
-              lon:  row[7], // lonx column
-              lat:  row[6]  // laty column
+              name: row[2], // waypoint_identifier
+              type: row[4], // waypoint_type
+              lon:  row[7], // waypoint_longitude
+              lat:  row[6]  // waypoint_latitude
             }));
           }
 
           // --- Load Airports ---
+          // Selects all airports within the map boundaries that have IFR capability.
           query = `
             SELECT * FROM tbl_airports 
             WHERE
@@ -558,17 +665,18 @@ function loadNavData() {
           const airportResult = dbObject.exec(query);
           if (airportResult.length > 0 && airportResult[0].values.length > 0) {
             airports = airportResult[0].values.map(row => ({
-              icao: row[2],    // icao column  
-              name: row[4],    // Name column
-              lon: row[6],    // lonx column
-              lat: row[5],     // laty column
-              TA: row[10],     // transition altitude column
-              TL: row[11],     // transition level column
-              elevation: row[9] // elevation column
+              icao: row[2],      // icao_identifier
+              name: row[4],      // airport_name
+              lon: row[6],       // airport_ref_longitude
+              lat: row[5],       // airport_ref_latitude
+              TA: row[10],       // transition_altitude
+              TL: row[11],       // transition_level
+              elevation: row[9]  // elevation
             }));
           }
 
           // --- Load VORs ---
+          // Selects all VOR and VOR/DME navaids within the map boundaries.
           query = `
             SELECT * FROM main.tbl_vhfnavaids 
             WHERE
@@ -579,15 +687,16 @@ function loadNavData() {
           const vorResult = dbObject.exec(query);
           if (vorResult.length > 0 && vorResult[0].values.length > 0) {
             vorData = vorResult[0].values.map(row => ({
-              id: row[3],     // vor_id column
-              name: row[4],   // name column
-              type: row[6],   // type column
-              lon: row[8],    // lonx column
-              lat: row[7]     // laty column
+              id: row[3],     // vor_identifier
+              name: row[4],   // navaid_name
+              type: row[6],   // navaid_class
+              lon: row[8],    // vor_longitude
+              lat: row[7]     // vor_latitude
             }));
           }
 
           // --- Load Terminal Waypoints ---
+          // Selects terminal-area waypoints (for SIDs/STARs) within the map boundaries.
           query = `
             SELECT * FROM tbl_terminal_waypoints
             WHERE
@@ -598,15 +707,16 @@ function loadNavData() {
           const terminalResult = dbObject.exec(query);
           if (terminalResult.length > 0 && terminalResult[0].values.length > 0) {
             terminalWaypoints = terminalResult[0].values.map(row => ({
-              name: row[3],   // ident column
-              airport: row[1], // airport column
-              type: row[5],   // type column
-              lon: row[7],    // lonx column
-              lat: row[6]     // laty column
+              name: row[3],   // waypoint_identifier
+              airport: row[1], // airport_identifier
+              type: row[5],   // waypoint_type
+              lon: row[7],    // waypoint_longitude
+              lat: row[6]     // waypoint_latitude
             }));
           }
 
           // --- Load Runways ---
+          // Selects all runway thresholds within the map boundaries.
           query = `
             SELECT * FROM tbl_runways
             WHERE
@@ -616,20 +726,21 @@ function loadNavData() {
           const runwayResult = dbObject.exec(query);
           if (runwayResult.length > 0 && runwayResult[0].values.length > 0) {
             runways = runwayResult[0].values.map(row => ({
-              id: row[3],     // runway_id column
-              airport: row[2],   // airport column
-              lon: row[5],    // lonx column
-              lat: row[4],     // laty column
-              length: row[12],  // length column
-              width: row[13],   // width column
-              thrElevation: row[9], // landing threshold elevation column
-              thrXelevation: row[11], // landing threshold crossing elevation column
-              magBearing: row[7], // magnetic bearing column
-              trueBearing: row[8] // true bearing column
+              id: row[3],           // runway_identifier
+              airport: row[2],      // airport_identifier
+              lon: row[5],          // runway_longitude
+              lat: row[4],          // runway_latitude
+              length: row[12],      // runway_length
+              width: row[13],       // runway_width
+              thrElevation: row[9], // landing_threshold_elevation
+              thrXelevation: row[11],// visual_glide_path_angle
+              magBearing: row[7],   // magnetic_bearing
+              trueBearing: row[8]   // true_bearing
             }));
           }
 
-          // --- ILSs ---
+          // --- Load ILS Data (Localizers and Glideslopes) ---
+          // Selects all ILS components within the map boundaries.
           query = `
             SELECT * FROM tbl_localizers_glideslopes
             WHERE
@@ -639,23 +750,25 @@ function loadNavData() {
           const ilsResult = dbObject.exec(query);
           if (ilsResult.length > 0 && ilsResult[0].values.length > 0) {
             ilsData = ilsResult[0].values.map(row => ({
-              airport: row[2], // airport column
-              runway: row[3], // runway column
-              id: row[4],     // ils_id column
-              type: row[10],   // type column
-              lon: row[6],    // lonx column
-              lat: row[5],     // laty column
-              bearing: row[8],  // bearing column
-              width: row[9],     // width column
-              gsLat: row[11],     // glideslope latitude column
-              gsLon: row[12],      // glideslope longitude column
-              gsAngle: row[13],     // glideslope angle column
-              gsElevation: row[14],   // glideslope elevation column
-              declination: row[15]    // declination column
+              airport: row[2],     // airport_identifier
+              runway: row[3],      // runway_identifier
+              id: row[4],          // llz_identifier
+              type: row[10],       // category
+              lon: row[6],         // llz_longitude
+              lat: row[5],         // llz_latitude
+              bearing: row[8],     // llz_magnetic_bearing
+              width: row[9],       // llz_width
+              gsLat: row[11],      // gs_latitude
+              gsLon: row[12],      // gs_longitude
+              gsAngle: row[13],    // gs_angle
+              gsElevation: row[14],// gs_elevation
+              declination: row[15] // magnetic_variation
             }));
           }
 
-          // --- Approach Paths ---
+          // --- Load Instrument Approach Procedures (IAPs) ---
+          // This is crucial for drawing accurate ILS localizer lines out to the initial approach fix.
+          // It selects all IAPs for the airports that were previously loaded.
           const icaoCodes = airports.map(airport => airport.icao);
           const icaoListForSQL = icaoCodes.map(code => `'${code}'`).join(',');
           query = `
@@ -665,34 +778,36 @@ function loadNavData() {
           `;
           const approachResult = dbObject.exec(query);
           if (approachResult.length > 0 && approachResult[0].values.length > 0) {
+            // This maps a large number of columns from the IAP table.
+            // These are used to determine approach transitions and fix locations.
             approachPaths = approachResult[0].values.map(row => ({
-              icao: row[1], // ICAO code
-              id: row[2],    // IAP ID
-              routeType: row[3], // Route type
-              transitionId: row[4], // Transition ID
-              seqno: row[5], // Sequence number
-              waypointId: row[7], // Waypoint ID
-              waypointLat: row[8], // Waypoint Latitude
-              waypointLon: row[9], // Waypoint Longitude
-              waypointType: row[10], // Waypoint Type
-              turnDirection: row[11], // Turn Direction
-              pathTerm: row[13], // Path Termination
-              navaid: row[14], // Navaid
-              navaidLat: row[15], // Navaid Latitude
-              navaidLon: row[16], // Navaid Longitude
-              arcRadius: row[17], // Arc Radius
-              theta: row[18], // Theta
-              rho: row[19], // Rho
-              magCourse: row[20], // Magnetic Course
-              routeHoldDistanceTime: row[21], // Route Hold Distance Time
-              distanceOrTime: row[22], // Distance or Time
-              altitudeDescription: row[23], // Altitude Description
-              altitude1: row[24], // Altitude 1
-              altitude2: row[25], // Altitude 2
-              transitionAlt: row[26], // Transition Altitude
-              speedLimitDescription: row[27], // Speed Limit Description
-              speedLimit: row[28], // Speed Limit
-              verticalAngle: row[29] // Vertical Angle
+              icao: row[1],
+              id: row[2],
+              routeType: row[3],
+              transitionId: row[4],
+              seqno: row[5],
+              waypointId: row[7],
+              waypointLat: row[8],
+              waypointLon: row[9],
+              waypointType: row[10],
+              turnDirection: row[11],
+              pathTerm: row[13],
+              navaid: row[14],
+              navaidLat: row[15],
+              navaidLon: row[16],
+              arcRadius: row[17],
+              theta: row[18],
+              rho: row[19],
+              magCourse: row[20],
+              routeHoldDistanceTime: row[21],
+              distanceOrTime: row[22],
+              altitudeDescription: row[23],
+              altitude1: row[24],
+              altitude2: row[25],
+              transitionAlt: row[26],
+              speedLimitDescription: row[27],
+              speedLimit: row[28],
+              verticalAngle: row[29]
             }));
           }
 
@@ -704,9 +819,17 @@ function loadNavData() {
     });
 }
 
-// --- EVENT LISTENERS ---
+// ================================================================================= //
+//                                     USER INPUT & EVENT LISTENERS                                   //
+// ================================================================================= //
 window.addEventListener("resize", resizeCanvas);
 
+// --- Prevent context menu on right-click ---
+canvas.addEventListener("contextmenu", (e) => {
+  e.preventDefault();
+});
+
+// --- Aircraft Selection (Left Click) ---
 canvas.addEventListener("click", (e) => {
   const rect = canvas.getBoundingClientRect();
   const mouseX = e.clientX - rect.left;
@@ -724,6 +847,7 @@ canvas.addEventListener("click", (e) => {
   });
 });
 
+// --- Data Tag Repositioning (Right Click) ---
 canvas.addEventListener("contextmenu", (e) => {
   e.preventDefault();
   const rect = canvas.getBoundingClientRect();
@@ -734,7 +858,8 @@ canvas.addEventListener("contextmenu", (e) => {
     const dy = plane.y - mouseY;
     if (Math.sqrt(dx * dx + dy * dy) < 10) {
       selectedAircraft = plane;
-      plane.tagAngle += Math.PI / 4;
+      plane.tagAngle += Math.PI / 4; // Cycle through 8 positions
+      // Redraw immediately to show the change
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       drawNavData();
       displayedAircraft = aircraftList.map(p => Object.assign(new Aircraft(), p));
@@ -743,12 +868,19 @@ canvas.addEventListener("contextmenu", (e) => {
   });
 });
 
+// --- Command Input Handling ---
+/**
+ * A generic handler for the heading, speed, and altitude input fields.
+ * It executes a given action when the Enter key is pressed.
+ * @param {KeyboardEvent} event - The keydown event object.
+ * @param {function} action - The function to call with the parsed input value.
+ */
 function handleCommandInput(event, action) {
   if (event.key === "Enter") {
     if (selectedAircraft) {
       const value = parseFloat(event.target.value);
       if (!isNaN(value)) {
-        action(value);
+        action(value); // e.g., call selectedAircraft.setHeading(value)
       }
     } else {
       console.log("No aircraft selected to give command to.");
@@ -756,6 +888,7 @@ function handleCommandInput(event, action) {
   }
 }
 
+// Assign the handler to each input field.
 headingInput.addEventListener("keydown", (e) => {
   handleCommandInput(e, (val) => selectedAircraft.setHeading(val));
 });
@@ -768,13 +901,19 @@ altitudeInput.addEventListener("keydown", (e) => {
   handleCommandInput(e, (val) => selectedAircraft.setAltitude(val));
 });
 
-// --- START THE GAME ---
+// ================================================================================= //
+//                                          APPLICATION START                                          //
+// ================================================================================= //
+// --- Initial Setup & Execution Order ---
+
+// Add some dummy aircraft for testing and demonstration purposes.
 aircraftList.push(new Aircraft("BAW123", 100, 100, 135, 180, 230));
 aircraftList.push(new Aircraft("AWE456", 700, 600, 225, 160, 160));
 displayedAircraft = aircraftList.map(p => Object.assign(new Aircraft(), p));
 selectedAircraft = aircraftList[0];
 
-calculateGeographicBounds(); // 1. Set up the geographic area
-loadNavData();             // 2. Load the data for that area
-resizeCanvas();              // 3. Size the canvas
-requestAnimationFrame(gameLoop); // 4. Start the animation
+// The application starts by following these steps in order:
+calculateGeographicBounds(); // 1. Define the geographic area to be displayed.
+loadNavData();             // 2. Asynchronously load all nav data for that area from the database.
+resizeCanvas();              // 3. Size the canvas to fit the window and calculate scale.
+requestAnimationFrame(gameLoop); // 4. Start the main animation loop.
