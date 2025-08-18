@@ -6,34 +6,21 @@
     <title>ATC Radar</title>
     <link rel="stylesheet" href="style.css" />
     <script src="node_modules\sql.js\dist\sql-wasm.js"></script>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Google+Sans+Code:wght@300..800&display=swap');
+    </style>
   </head>
   <body>
-    <div id="game-container">
-      <div id="canvas-stack">
-        <canvas id="navdata-canvas"></canvas>
-        <canvas id="radar-scope"></canvas>
-      </div>
-
-      <div id="ui-panel">
-        <h2>Sector Control</h2>
-        <div id="selected-aircraft-info">
-          <p>No aircraft selected</p>
-        </div>
-        <div id="commands">
-          <label for="heading-input">Heading (001-360)</label>
-          <input type="number" id="heading-input" min="0" max="359">
-
-          <label for="speed-input">Speed (kias)</label>
-          <input type="number" id="speed-input" min="100">
-
-          <label for="altitude-input">Altitude (FL)</label>
-          <input type="number" id="altitude-input" min="1000" step="1000">
-
-          <button type="button" id="app-mode-btn" >Approach Clearance</button>
-        </div>
-      </div>
+  <div id="game-container">
+    <div id="canvas-stack">
+      <canvas id="navdata-canvas"></canvas>
+      <canvas id="radar-scope"></canvas>
+      
+      <input type="number" id="tag-input" />
     </div>
 
-    <script src="game.js"></script>
-  </body>
+    </div>
+
+  <script src="game.js"></script>
+</body>
 </html>

@@ -8,10 +8,7 @@ const navdataCanvas = document.getElementById("navdata-canvas");
 const navCtx = navdataCanvas.getContext("2d");
 const canvasStack = document.getElementById("canvas-stack");
 
-const uiPanel = document.getElementById("ui-panel");
-const headingInput = document.getElementById("heading-input");
-const speedInput = document.getElementById("speed-input");
-const altitudeInput = document.getElementById("altitude-input");
+const tagInput = document.getElementById("tag-input");
 
 // ================================================================================= //
 //                                      CORE SIMULATION SETTINGS                     //
@@ -73,6 +70,7 @@ let runways = []; // Holds all runway data loaded from the database.
 let ilsData = []; // Holds all ILS (localizer/glideslope) data loaded from the database.
 let approachPaths = []; // Holds all instrument approach procedure data.
 let selectedAircraft = null; // The aircraft currently selected by the user.
+let hoveredAircraft = null; // The aircraft currently being hovered by the mouse.
 let radarRadius; // The radius of the radar scope in pixels, calculated on resize.
 let kmPerPixel; // The ratio of kilometers to pixels, used for converting real-world distances to screen distances.
 
@@ -81,7 +79,6 @@ let kmPerPixel; // The ratio of kilometers to pixels, used for converting real-w
 // ================================================================================= //
 let lastUpdateTime = 0; // The timestamp of the last frame update.
 let timeSinceLastSweep = 0; // Time accumulator for the radar sweep effect.
-let displayedAircraft = []; // A 'frozen' snapshot of aircraft states, updated every sweep.
 
 // ================================================================================= //
 //                                     AIRCRAFT CLASS DEFINITION                     //
@@ -95,24 +92,33 @@ class Aircraft {
    * @param {number} heading - The initial heading in degrees.
    * @param {number} altitude - The initial altitude in feet.
    * @param {number} speed - The initial speed in knots.
+   * @param {string} destination - The flight's destination airport ICAO code.
+   * @param {string} wtc - The wake turbulence category (e.g., "L", "M", "H").
    * @param {number} [tagAngle=0] - The initial angle for the data tag, in radians.
    */
-  constructor(callsign, lat, lon, heading, altitude, speed, tagAngle) {
+  constructor(callsign, lat, lon, heading, altitude, speed, destination, wtc, tagAngle) {
     this.callsign = callsign;
-    // NEW: Position is stored as geographical coordinates, not pixels.
     this.lat = lat;
     this.lon = lon;
+    this.destination = destination;
+    this.wtc = wtc;
+    this.scratchpad = "SCRATCHPAD";
+    this.verticalSpeed = 0;
 
-    // Current and target values for aircraft parameters.
+    const { x, y } = latLonToPixel(this.lat, this.lon);
+    this.displayX = x;
+    this.displayY = y;
+    
+    this.displayHdg = heading; 
     this.heading = heading;
     this.targetHdg = heading;
     this.altitude = altitude;
     this.targetAlt = altitude;
     this.speed = speed;
     this.targetSpd = speed;
-
     this.tagAngle = tagAngle || 0;
   }
+
 
   /**
    * Updates the aircraft's geographical position based on its speed, heading, and the time elapsed.
@@ -137,25 +143,22 @@ class Aircraft {
 
   /**
    * Draws the aircraft and its associated data on the canvas.
+   * @param {boolean} [isHovered=false] - True if the mouse is hovering over the tag.
    */
-  draw() {
-    // Convert lat/lon to pixel coordinates right before drawing.
-    const { x, y } = latLonToPixel(this.lat, this.lon);
+  draw(isHovered = false) {
+    const x = this.displayX;
+    const y = this.displayY;
 
-    // --- Draw the aircraft symbol (a circle) ---
+    // --- Draw aircraft symbol and vector line --- (This part is unchanged)
     ctx.beginPath();
     ctx.arc(x, y, 4, 0, 2 * Math.PI);
-    ctx.globalAlpha = 1;
     ctx.fillStyle = "#0f0";
     ctx.fill();
-    ctx.globalAlpha = 1;
-
-    // --- Draw the speed vector line ---
-    const lineTimeLength = 60; // seconds
+    const lineTimeLength = 60;
     const speedInKps = this.speed * KNOTS_TO_KPS;
     const distanceKm = speedInKps * lineTimeLength;
     const lineLength = distanceKm / kmPerPixel;
-    const rad = (this.heading * Math.PI) / 180;
+    const rad = (this.displayHdg * Math.PI) / 180;
     const endX = x + Math.sin(rad) * lineLength;
     const endY = y - Math.cos(rad) * lineLength;
     ctx.beginPath();
@@ -165,19 +168,33 @@ class Aircraft {
     ctx.lineWidth = 2;
     ctx.stroke();
 
-    // --- Draw the data tag (callsign, altitude, speed) ---
-    ctx.font = '12px "Courier New"';
-    const tagRadius = 40;
-    const tagX = x + tagRadius * Math.cos(this.tagAngle);
-    const tagY = y + tagRadius * Math.sin(this.tagAngle);
-    ctx.textAlign = "center";
+    // --- NEW: Use the master layout function ---
+    const layout = calculateTagLayout(this, isHovered);
+    ctx.font = '11px "Google Sans Code"';
+    ctx.textAlign = "left";
     ctx.textBaseline = "middle";
-    
-    // CHANGED: Convert altitude to Flight Level for display (e.g., 18000 ft -> "180")
-    const flightLevel = Math.round(this.altitude / 100).toString().padStart(3, '0');
 
-    ctx.fillText(this.callsign, tagX, tagY - 8);
-    ctx.fillText(`${flightLevel}  ${Math.round(this.speed)}`, tagX, tagY + 8);
+    if (isHovered) {
+        ctx.fillStyle = "rgba(30, 30, 30, 0.9)";
+        ctx.fillRect(
+            layout.anchor.x - (layout.block.width / 2) - layout.padding,
+            layout.anchor.y - (layout.block.height / 2) - layout.padding,
+            layout.block.width + (layout.padding * 2),
+            layout.block.height + (layout.padding * 2)
+        );
+        ctx.fillStyle = "#0f0";
+    }
+
+    if (isHovered) {
+        ctx.fillText(layout.lines[0].text, layout.tagOriginX, layout.anchor.y - layout.lineHeight * 1.5);
+        ctx.fillText(layout.lines[1].text, layout.tagOriginX, layout.anchor.y - layout.lineHeight * 0.5);
+        ctx.fillText(layout.lines[2].text, layout.tagOriginX, layout.anchor.y + layout.lineHeight * 0.5);
+        ctx.fillText(layout.lines[3].text, layout.tagOriginX, layout.anchor.y + layout.lineHeight * 1.5);
+    } else {
+        ctx.fillText(layout.lines[0].text, layout.tagOriginX, layout.anchor.y - layout.lineHeight);
+        ctx.fillText(layout.lines[1].text, layout.tagOriginX, layout.anchor.y);
+        ctx.fillText(layout.lines[2].text, layout.tagOriginX, layout.anchor.y + layout.lineHeight);
+    }
   }
 
   // --- The setHeading, setSpeed, and setAltitude methods remain unchanged. ---
@@ -240,7 +257,15 @@ class Aircraft {
     if (this._altitudeInterval) clearInterval(this._altitudeInterval);
     this.targetAlt = newAltitude;
     const initialAltitude = this.altitude;
-    const duration = Math.abs(newAltitude - this.altitude) * 6;
+    
+    // Using a more realistic vertical speed of ~1500 FPM to calculate duration
+    const duration = (Math.abs(newAltitude - this.altitude) / 1500) * 60 * 1000;
+    
+    // ADDED: Calculate and set the vertical speed
+    if (duration > 0) {
+        this.verticalSpeed = (newAltitude - initialAltitude) / (duration / 60000); // FPM
+    }
+
     const startTime = Date.now();
 
     this._altitudeInterval = setInterval(() => {
@@ -251,6 +276,7 @@ class Aircraft {
 
       if (t >= 1 || Math.abs(this.altitude - newAltitude) < 1) {
         this.altitude = newAltitude;
+        this.verticalSpeed = 0; // Reset vertical speed when altitude is reached
         clearInterval(this._altitudeInterval);
         this._altitudeInterval = null;
       }
@@ -276,8 +302,7 @@ function latLonToPixel(lat, lon) {
 
 function resizeCanvas() {
   const padding = 20;
-  const gap = 10;
-  const availableWidth = window.innerWidth - uiPanel.offsetWidth - padding - gap;
+  const availableWidth = window.innerWidth - padding;
   const availableHeight = window.innerHeight - padding;
   const size = Math.min(availableWidth, availableHeight);
 
@@ -294,6 +319,104 @@ function resizeCanvas() {
   drawNavData();
 }
 
+function calculateTagLayout(plane, isHovered) {
+    ctx.font = '11px "Google Sans Code"';
+    const lineHeight = 15;
+    const padding = 3;
+
+    // --- 1. Prepare Text Content ---
+    const assignedHdg = `H${Math.round(plane.targetHdg).toString().padStart(3, '0')}`;
+    const line1 = { text: `${plane.callsign} ${assignedHdg}` };
+
+    const currentFL = Math.round(plane.altitude / 100).toString().padStart(3, '0');
+    let trendIndicator = " ";
+    if (Math.abs(plane.targetAlt - plane.altitude) > 50) {
+        trendIndicator = plane.targetAlt > plane.altitude ? "↑" : "↓";
+    }
+    const crcVal = Math.round(plane.verticalSpeed / 100);
+    const crcText = `${crcVal > 0 ? '+' : ''}${crcVal.toString().padStart(2, '0')}`;
+    const line2 = { 
+      text: isHovered 
+        ? `${currentFL}${trendIndicator} ${plane.destination} XX ${crcText}`
+        : `${currentFL}${trendIndicator} ${plane.destination}`
+    };
+    
+    const clearedFL = Math.round(plane.targetAlt / 100).toString().padStart(3, '0');
+    const speedWTC = `${Math.round(plane.speed)}${plane.wtc}`;
+    const line3 = { text: `${speedWTC} ${clearedFL}` };
+    
+    const line4 = { text: plane.scratchpad };
+
+    const lines = isHovered ? [line1, line2, line3, line4] : [line1, line2, line3];
+    lines.forEach(line => line.width = ctx.measureText(line.text).width);
+
+    // --- 2. Calculate Block Dimensions ---
+    const blockWidth = Math.max(...lines.map(line => line.width));
+    const blockHeight = lineHeight * lines.length;
+    
+    // --- 3. Calculate Positions ---
+    const TAG_GAP = 15;
+    const radiusX = (blockWidth / 2) + TAG_GAP + padding;
+    const radiusY = (blockHeight / 2) + TAG_GAP + padding;
+    const anchor = {
+        x: plane.displayX + radiusX * Math.cos(plane.tagAngle),
+        y: plane.displayY + radiusY * Math.sin(plane.tagAngle)
+    };
+    const tagOriginX = anchor.x - (blockWidth / 2);
+
+    // --- 4. Calculate Hitboxes ---
+    // This logic now calculates the Y position based on the hover state.
+    const callsignText = `${plane.callsign} `;
+    const speedWTCText = `${Math.round(plane.speed)}${plane.wtc}`;
+    const clearedFLText = ` ${Math.round(plane.targetAlt / 100).toString().padStart(3, '0')}`;
+
+    const headingWidth = ctx.measureText(assignedHdg).width;
+    const headingX = tagOriginX + ctx.measureText(callsignText).width;
+    const speedWidth = ctx.measureText(speedWTCText).width;
+    const altitudeWidth = ctx.measureText(clearedFLText).width;
+    const altitudeX = tagOriginX + ctx.measureText(speedWTCText).width;
+    
+    const hitboxes = {
+        heading: { 
+            x: headingX, 
+            y: isHovered ? anchor.y - lineHeight * 1.5 : anchor.y - lineHeight, 
+            width: headingWidth,  
+            height: lineHeight 
+        },
+        speed: { 
+            x: tagOriginX,
+            y: isHovered ? anchor.y + lineHeight * 0.5 : anchor.y + lineHeight, 
+            width: speedWidth,    
+            height: lineHeight 
+        },
+        altitude: { 
+            x: altitudeX, 
+            y: isHovered ? anchor.y + lineHeight * 0.5 : anchor.y + lineHeight, 
+            width: altitudeWidth, 
+            height: lineHeight 
+        }
+    };
+
+    return { lines, block: { width: blockWidth, height: blockHeight }, anchor, tagOriginX, hitboxes, padding, lineHeight };
+}
+
+function getAircraftTagBoundingBox(plane) {
+    const layout = calculateTagLayout(plane, hoveredAircraft === plane);
+    return {
+        x: layout.anchor.x - (layout.block.width / 2) - layout.padding,
+        y: layout.anchor.y - (layout.block.height / 2) - layout.padding,
+        width: layout.block.width + (layout.padding * 2),
+        height: layout.block.height + (layout.padding * 2)
+    };
+}
+
+function getTagHitboxes(plane) {
+    // REFACTORED: Simply asks the master function for the pre-calculated hitboxes.
+    // Since we only click when hovered, we can assume the detailed view.
+    const layout = calculateTagLayout(plane, true);
+    return layout.hitboxes;
+}
+
 function drawVorSymbol(ctx, x, y, size) {
   ctx.beginPath();
   ctx.moveTo(x + size * Math.cos(0), y + size * Math.sin(0));
@@ -301,12 +424,12 @@ function drawVorSymbol(ctx, x, y, size) {
     const angle = i * Math.PI / 3;
     ctx.lineTo(x + size * Math.cos(angle), y + size * Math.sin(angle));
   }
-  ctx.strokeStyle = "rgba(0, 255, 0, 0.7)";
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.75)";
   ctx.lineWidth = 1.5;
   ctx.stroke();
   ctx.beginPath();
   ctx.arc(x, y, 1.5, 0, 2 * Math.PI);
-  ctx.fillStyle = "rgba(0, 255, 0, 0.7)";
+  ctx.fillStyle = "rgba(255, 255, 255, 0.75)";
   ctx.fill();
 }
 
@@ -316,13 +439,11 @@ function drawVorSymbol(ctx, x, y, size) {
  * This function is called on every frame to ensure the nav data is always visible.
  */
 function drawNavData() {
-
-  console.log("Drawing navigation data...");
   // --- Set default drawing styles for nav data ---
   navCtx.clearRect(0, 0, navdataCanvas.width, navdataCanvas.height);
 
-  navCtx.fillStyle = "rgba(0, 255, 0, 0.7)";
-  navCtx.strokeStyle = "rgba(0, 255, 0, 0.7)";
+  navCtx.fillStyle = "rgba(255, 255, 255, 0.75)";
+  navCtx.strokeStyle = "rgba(255, 255, 255, 0.75)";
   navCtx.font = '11px "Courier New"';
   navCtx.textAlign = "left";
   navCtx.textBaseline = "middle";
@@ -464,7 +585,7 @@ function drawNavData() {
       navCtx.beginPath();
       navCtx.moveTo(threshold.x, threshold.y); // Start at the runway threshold.
       navCtx.lineTo(endX, endY);               // Extend out along the approach course.
-      navCtx.strokeStyle = "rgba(255, 255, 0, 0.7)"; // Yellow for ILS
+      navCtx.strokeStyle = "rgba(156, 156, 106, 1)"; // Yellow for ILS
       navCtx.lineWidth = 3;
       navCtx.stroke();
     }
@@ -558,7 +679,7 @@ function drawNavData() {
     // If the navaid has DME capability (type includes 'D'), draw a square box around it.
     if (vor.type[1] === 'D') {
       const boxSize = size * 2.5;
-      navCtx.strokeStyle = "rgba(0, 255, 0, 0.7)";
+      navCtx.strokeStyle = "rgba(255, 255, 255, 0.75)";
       navCtx.lineWidth = 1.5;
       navCtx.strokeRect(x - boxSize / 2, y - boxSize / 2, boxSize, boxSize);
     }
@@ -572,19 +693,37 @@ function gameLoop(currentTime) {
   const deltaTimeMs = currentTime - lastUpdateTime;
   lastUpdateTime = currentTime;
 
-  aircraftList.forEach(plane => plane.update(deltaTimeMs / 1000));
+aircraftList.forEach(plane => plane.update(deltaTimeMs / 1000));
 
   timeSinceLastSweep += deltaTimeMs;
   if (timeSinceLastSweep >= SWEEP_INTERVAL_MS) {
-    displayedAircraft = aircraftList.map(p => Object.assign(new Aircraft(), p));
-    timeSinceLastSweep -= SWEEP_INTERVAL_MS;
+    aircraftList.forEach(plane => {
+        const { x, y } = latLonToPixel(plane.lat, plane.lon);
+        plane.displayX = x;
+        plane.displayY = y;
+        plane.displayHdg = plane.heading; 
+    });
+    timeSinceLastSweep = 0;
   }
 
-  // --- OPTIMIZED DRAWING ---
-  // 1. Clear only the top (aircraft) canvas. The bottom canvas is untouched.
+  if (activeInput) {
+    const isPlaneHovered = activeInput.plane === hoveredAircraft;
+    // Get the layout that matches the CURRENT visual state.
+    const layout = calculateTagLayout(activeInput.plane, isPlaneHovered);
+    const box = layout.hitboxes[activeInput.property];
+    if (box) {
+      tagInput.style.left = `${box.x}px`;
+      tagInput.style.top = `${box.y - box.height / 2}px`;
+    }
+  }
+
+
+  // 3. Clear the canvas and draw every frame.
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  // 2. Draw the aircraft on the transparent top canvas.
-  displayedAircraft.forEach(plane => plane.draw());
+  
+  // Draw from the master list, passing the real-time hover state.
+  // The position (displayX/Y) is frozen, but the tag data is live.
+  aircraftList.forEach(plane => plane.draw(plane === hoveredAircraft));
 
   requestAnimationFrame(gameLoop);
 }
@@ -806,32 +945,119 @@ function loadNavData() {
 //                                     USER INPUT & EVENT LISTENERS                  //
 // ================================================================================= //
 window.addEventListener("resize", resizeCanvas);
+canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
-// --- Prevent context menu on right-click ---
-canvas.addEventListener("contextmenu", (e) => {
-  e.preventDefault();
+let activeInput = null;
+
+/**
+ * Shows the tag input box over the correct element.
+ * @param {Aircraft} plane - The plane being edited.
+ * @param {string} property - "heading", "speed", or "altitude".
+ * @param {{x, y, width, height}} hitbox - The screen position to place the input over.
+ */
+function showTagInput(plane, property, hitbox) {
+    activeInput = { plane, property };
+    
+    tagInput.style.display = 'block';
+    tagInput.style.left = `${hitbox.x}px`;
+    tagInput.style.top = `${hitbox.y - hitbox.height / 2}px`;
+    tagInput.style.width = `${hitbox.width}px`;
+    tagInput.style.height = `${hitbox.height}px`;
+
+    // Set initial value based on the property
+    if (property === 'heading') tagInput.value = plane.targetHdg;
+    if (property === 'speed') tagInput.value = plane.targetSpd;
+    if (property === 'altitude') tagInput.value = plane.targetAlt / 100;
+
+    tagInput.focus();
+    tagInput.select();
+}
+
+// --- Main Click Listener for Tag Interaction ---
+canvas.addEventListener('click', (e) => {
+    // If the input is already active, a click away should hide it.
+    if (activeInput) {
+        tagInput.style.display = 'none';
+        activeInput = null;
+        return;
+    }
+    
+    const rect = canvas.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+
+    // Check clicks against each aircraft's tag hitboxes
+    for (const plane of aircraftList) {
+        const hitboxes = getTagHitboxes(plane);
+        
+        for (const property in hitboxes) {
+            const box = hitboxes[property];
+            if (mouseX > box.x && mouseX < box.x + box.width &&
+                mouseY > box.y - box.height / 2 && mouseY < box.y + box.height / 2)
+            {
+                showTagInput(plane, property, box);
+                return; // Stop after finding the first clicked element
+            }
+        }
+    }
 });
 
-// --- Aircraft Selection (Left Click) ---
-canvas.addEventListener("click", (e) => {
-  const rect = canvas.getBoundingClientRect();
-  const mouseX = e.clientX - rect.left;
-  const mouseY = e.clientY - rect.top;
 
-  aircraftList.forEach((plane) => {
-    // Get the plane's current pixel position for the click check.
-    const { x, y } = latLonToPixel(plane.lat, plane.lon);
-    const dx = x - mouseX;
-    const dy = y - mouseY;
-    if (Math.sqrt(dx * dx + dy * dy) < 10) {
-      selectedAircraft = plane;
-      document.getElementById("selected-aircraft-info").innerHTML = `<p>${plane.callsign}</p>`;
-      headingInput.value = plane.targetHdg;
-      speedInput.value = plane.targetSpd;
-      // CHANGED: Display the target altitude in the input box as a Flight Level.
-      altitudeInput.value = plane.targetAlt / 100;
+// --- Event Listener for the Pop-up Input Field ---
+tagInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+        if (activeInput) {
+            const value = parseFloat(tagInput.value);
+            if (!isNaN(value)) {
+                const { plane, property } = activeInput;
+                if (property === 'heading') plane.setHeading(value);
+                if (property === 'speed') plane.setSpeed(value);
+                if (property === 'altitude') plane.setAltitude(value * 100);
+            }
+        }
+        tagInput.blur(); // Triggers the blur event to hide the input
     }
-  });
+    if (e.key === 'Escape') {
+        tagInput.blur();
+    }
+});
+
+// --- Real-time validation for the Pop-up Input Field ---
+tagInput.addEventListener('input', () => {
+    // Remove any character that is not a digit
+    tagInput.value = tagInput.value.replace(/[^0-9]/g, '');
+
+    // Enforce the 3-digit limit
+    if (tagInput.value.length > 3) {
+        tagInput.value = tagInput.value.slice(0, 3);
+    }
+});
+
+
+// Hide the input when the user clicks away or presses Enter
+tagInput.addEventListener('blur', () => {
+    tagInput.style.display = 'none';
+    activeInput = null;
+});
+
+// --- Mouse Hover Detection ---
+canvas.addEventListener('mousemove', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+
+    let foundAircraft = null;
+    // Iterate in reverse so the top-most aircraft is selected if they overlap
+    for (let i = aircraftList.length - 1; i >= 0; i--) {
+        const plane = aircraftList[i];
+        const bounds = getAircraftTagBoundingBox(plane);
+        if (mouseX > bounds.x && mouseX < bounds.x + bounds.width &&
+            mouseY > bounds.y && mouseY < bounds.y + bounds.height) {
+            foundAircraft = plane;
+            break;
+        }
+    }
+    hoveredAircraft = foundAircraft;
 });
 
 // --- Data Tag Repositioning (Right Click) ---
@@ -841,53 +1067,14 @@ canvas.addEventListener("contextmenu", (e) => {
   const mouseX = e.clientX - rect.left;
   const mouseY = e.clientY - rect.top;
 
+  // The check now correctly uses the aircraft's display position.
   aircraftList.forEach((plane) => {
-    // NEW: Get the plane's current pixel position for the click check.
-    const { x, y } = latLonToPixel(plane.lat, plane.lon);
-    const dx = x - mouseX;
-    const dy = y - mouseY;
-    if (Math.sqrt(dx * dx + dy * dy) < 10) {
-      selectedAircraft = plane;
-      plane.tagAngle += Math.PI / 4; // Cycle through 8 positions
-      // Redraw immediately to show the change
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      displayedAircraft = aircraftList.map(p => Object.assign(new Aircraft(), p));
-      displayedAircraft.forEach(plane => plane.draw());
+    const dx = plane.displayX - mouseX;
+    const dy = plane.displayY - mouseY;
+    if (Math.sqrt(dx * dx + dy * dy) < 15) { // Increased radius for easier clicking
+      plane.tagAngle += Math.PI / 3; // Cycle through 6 positions
     }
   });
-});
-
-// --- Command Input Handling ---
-/**
- * A generic handler for the heading, speed, and altitude input fields.
- * It executes a given action when the Enter key is pressed.
- * @param {KeyboardEvent} event - The keydown event object.
- * @param {function} action - The function to call with the parsed input value.
- */
-function handleCommandInput(event, action) {
-  if (event.key === "Enter") {
-    if (selectedAircraft) {
-      const value = parseFloat(event.target.value);
-      if (!isNaN(value)) {
-        action(value); // e.g., call selectedAircraft.setHeading(value)
-      }
-    } else {
-      console.log("No aircraft selected to give command to.");
-    }
-  }
-}
-
-// Assign the handler to each input field.
-headingInput.addEventListener("keydown", (e) => {
-  handleCommandInput(e, (val) => selectedAircraft.setHeading(val));
-});
-
-speedInput.addEventListener("keydown", (e) => {
-  handleCommandInput(e, (val) => selectedAircraft.setSpeed(val));
-});
-
-altitudeInput.addEventListener("keydown", (e) => {
-  handleCommandInput(e, (val) => selectedAircraft.setAltitude(val * 100));
 });
 
 // ================================================================================= //
@@ -904,9 +1091,8 @@ resizeCanvas();
 const initialPos1 = pixelToLatLon(100, 100);
 const initialPos2 = pixelToLatLon(700, 600);
 
-aircraftList.push(new Aircraft("BAW123", initialPos1.lat, initialPos1.lon, 135, 18000, 230));
-aircraftList.push(new Aircraft("AWE456", initialPos2.lat, initialPos2.lon, 225, 16000, 160));
-displayedAircraft = aircraftList.map(p => Object.assign(new Aircraft(), p));
+aircraftList.push(new Aircraft("BAW123", initialPos1.lat, initialPos1.lon, 135, 18000, 230, "LIMC", "M"));
+aircraftList.push(new Aircraft("AWE456", initialPos2.lat, initialPos2.lon, 225, 16000, 160, "LIML", "M"));
 selectedAircraft = aircraftList[0];
 
 

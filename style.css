@@ -19,7 +19,6 @@ html {
 
 #canvas-stack {
   position: relative;
-  margin-right: 10px; /* Space between radar and panel */
 }
 
 #navdata-canvas,
@@ -38,13 +37,6 @@ html {
 #radar-scope {
   background-color: transparent;
   z-index: 2;
-}
-
-
-#ui-panel {
-  width: 200px;
-  border: 1px solid #0f0;
-  padding: 10px;
 }
 
 #commands {
@@ -78,4 +70,41 @@ button {
   width: 100%;
   margin-top: 10px;
   cursor: pointer;
+}
+
+#tag-input {
+  position: absolute;
+  display: none;
+  z-index: 10;
+  text-align: center;
+  font-size: 11px; /* Match canvas font size */
+  background-color: #0f0;
+  color: #111;
+  border: 1px solid #fff; /* White border for better visibility */
+  box-shadow: 0 0 10px #0f0;
+  font-family: "Google Sans Code", monospace;
+  font-optical-sizing: auto;
+  font-weight: 300;
+  font-style: normal;
+  padding: 0 0px;
+  box-sizing: border-box;
+
+}
+
+.google-sans-code-300 {
+  font-family: "Google Sans Code", monospace;
+  font-optical-sizing: auto;
+  font-weight: 300;
+  font-style: normal;
+}
+
+input::-webkit-outer-spin-button,
+input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+input[type=number] {
+  appearance: textfield;
+  -moz-appearance: textfield;
 }
